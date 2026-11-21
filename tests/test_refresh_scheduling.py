@@ -16,6 +16,7 @@ from blueprints.playlist import playlist_bp
 from blueprints.plugin import plugin_bp
 from config import Config
 from display.display_manager import DisplayManager
+from display.panel_io import PanelIO
 from display.waveshare_display import WaveshareDisplay
 from model import PluginInstance, RefreshInfo
 from plugins.clock.clock import Clock
@@ -178,7 +179,7 @@ def test_stopped_worker_and_saved_playlist_endpoint(rig):
 
 
 def test_waveshare_driver_exception_preserves_last_frame(rig):
-    _, manager, _, client = rig
+    worker, manager, config, client = rig
     # Use the real adapter with a simulated SPI device.
     manager.display_type = "epd7in3"
     adapter = object.__new__(WaveshareDisplay)
@@ -186,14 +187,20 @@ def test_waveshare_driver_exception_preserves_last_frame(rig):
     adapter.epd_display = Mock()
     adapter.bi_color_display = False
     manager.display = adapter
-    manager.display_image(Image.new("RGB", (8, 4), "white"))
+    manager.panel_io = PanelIO()
+    worker.start()
+    assert finish(client, submit(client, "white"))["state"] == "completed"
     old = client.get("/api/current_image").data
+    confirmed = config.get_refresh_info().to_dict()
     adapter.epd_display.display.side_effect = OSError("transfer failed")
-    with pytest.raises(OSError):
-        manager.display_image(Image.new("RGB", (8, 4), "black"))
-    assert client.get("/api/current_image").data == old
+    failure = finish(client, submit(client, "black"))
+    assert failure["state"] == "failed" and "Force panel refresh" in failure["message"]
     adapter.epd_display.display.side_effect = None
-    assert manager.display_image(Image.new("RGB", (8, 4), "white"))[1]
+    assert finish(client, submit(client, "white"))["state"] == "failed"
+    assert client.get("/api/current_image").data == old
+    assert config.get_refresh_info().to_dict() == confirmed
+    assert finish(client, submit(client, "black", force=True))["message"] == "Display updated."
+    assert finish(client, submit(client, "black"))["message"] == "Image already displayed."
     assert adapter.epd_display.display.call_count == 3
 
 

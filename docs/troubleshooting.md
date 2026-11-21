@@ -231,4 +231,6 @@ To check the Zero 2 W, run the following from a checkout of this revision using 
 python scripts/benchmark_service.py --pi-budget --preview-dir /tmp/inkypi-dashboard-preview
 ```
 
-The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job publishes these images, its memory measurements, and previews from both Pimoroni 7.3-inch driver encoders in the `arm64-dashboard` artifact. It intercepts the transfer after each driver packs its frame and verifies that unpacking the bytes reproduces the driver buffer pixel for pixel. The two driver previews use nominal pigment colours.
+The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job runs both images through the pinned AC073TC1A and E673 drivers and publishes their previews and memory measurements in the `arm64-dashboard` artifact. QC captures the data command after the driver's final pigment mapping and checks all 384,000 pixels, the order of refresh and power commands, and known grayscale and colour patterns. The previews use nominal pigment colours. Physical colour, BUSY timing and SPI delivery still require a panel test.
+
+If a live refresh reports **Panel update interrupted**, inspect the display and use **Force panel refresh** for one retry. InkyPi keeps the last confirmed preview and pauses ordinary panel writes until a forced write succeeds. An image rejected during encoding can be corrected and retried immediately if the panel was previously in a known state.

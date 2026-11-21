@@ -40,6 +40,30 @@ def test_pinned_impression_driver_produces_native_colour_codes(monkeypatch, modu
     show.assert_called_once()
 
 
+@pytest.mark.parametrize(("model", "red_blue"), [("inky_ac073tc1a", 0x43), ("inky_e673", 0x35)])
+@pytest.mark.parametrize("mode", ["L", "RGB"])
+def test_impression_command_payload_matches_known_pixels(monkeypatch, model, red_blue, mode):
+    pytest.importorskip("inky")
+    from scripts.check_impression_frame import capture_refresh
+    vendor = importlib.import_module("inky." + model)
+    monkeypatch.setattr(vendor.eeprom, "read_eeprom", lambda **_: None)
+    chip = vendor.Inky(resolution=(800, 480))
+    monkeypatch.setattr(importlib.import_module("inky.auto"), "auto", lambda: chip)
+    adapter = InkyDisplay(Mock())
+    frame = Image.new(mode, (800, 480), "white")
+    for xy in [(0, 0), (1, 1), (799, 479)]:
+        frame.putpixel(xy, 0 if mode == "L" else (0, 0, 0))
+    # Native white in both nibbles, with asymmetric marks at known wire offsets.
+    expected = bytearray([0x11]) * 192000
+    expected[0], expected[400], expected[-1] = 0x01, 0x10, 0x10
+    if mode == "RGB":
+        frame.putpixel((2, 2), (255, 0, 0))
+        frame.putpixel((3, 2), (0, 0, 255))
+        expected[801] = red_blue
+    payload, _ = capture_refresh(chip, lambda: adapter.display_image(frame, saturation=0.0))
+    assert payload == expected
+
+
 @pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
 @pytest.mark.parametrize("inverted", [False, True])
 @pytest.mark.parametrize("mode", ["RGB", "L", "RGBA", "P"])
@@ -91,11 +115,73 @@ def test_pimoroni_busy_timeout_and_held_high_have_distinct_outcomes():
     def vendor_warning(message):
         warnings.warn_explicit(message, UserWarning, "inky_e673.py", 1, module="inky.inky_e673")
     backend.inky_display.show.side_effect = lambda: vendor_warning("Busy Wait: Timed out after 40.00s")
-    with pytest.raises(UserWarning, match="Timed out"):
+    with pytest.raises(PanelUnavailable, match="Force panel refresh") as failure:
         backend.display_image(image, saturation=0.5)
+    assert isinstance(failure.value.__cause__, UserWarning)
     backend.inky_display.show.side_effect = lambda: vendor_warning("Busy Wait: Held high. Waiting for 40.00s")
     with pytest.warns(UserWarning, match="Held high"):
         backend.display_image(image, saturation=0.5)
+
+
+@pytest.mark.parametrize("stored", [[600, 448], [480, 800], [800, 480]])
+def test_inky_uses_detected_panel_dimensions(monkeypatch, stored):
+    chip = SimpleNamespace(width=800, height=480, BLACK=0, set_border=Mock(),
+                           set_image=lambda frame: None)
+    monkeypatch.setitem(sys.modules, "inky.auto", SimpleNamespace(auto=lambda: chip))
+    cfg = Mock()
+    cfg.get_config.return_value = stored
+    InkyDisplay(cfg)
+    if stored == [800, 480]:
+        cfg.update_value.assert_not_called()
+    else:
+        cfg.update_value.assert_called_once_with("resolution", [800, 480], write=True)
+
+
+def test_failed_panel_transfer_requires_successful_force_to_resume():
+    chip = Mock()
+    backend = object.__new__(InkyDisplay)
+    backend.inky_display = chip
+    backend._supports_saturation = True
+    io = PanelIO()
+    frame = Image.new("RGB", (4, 4))
+    def write(force=False):
+        io.write(backend, frame, (), {"saturation": 0.5}, force=force)
+
+    # A rejected image has not reached the hardware; a corrected image can run.
+    chip.set_image.side_effect = ValueError("bad image")
+    with pytest.raises(ValueError):
+        write()
+    chip.show.assert_not_called()
+    chip.set_image.side_effect = None
+    chip.show.side_effect = [OSError("SPI write interrupted"), None, None]
+    with pytest.raises(PanelUnavailable, match="Force panel refresh"):
+        write()
+    with pytest.raises(PanelUnavailable, match="uncertain"):
+        write()
+    # Even a pre-transfer error on a forced retry cannot confirm the old frame.
+    chip.set_image.side_effect = ValueError("bad recovery image")
+    with pytest.raises(ValueError):
+        write(force=True)
+    chip.set_image.side_effect = None
+    with pytest.raises(PanelUnavailable, match="uncertain"):
+        write()
+    write(force=True)
+    write()
+    assert chip.show.call_count == 3
+
+
+def test_waveshare_prepares_buffers_before_clearing():
+    panel = Mock()
+    adapter = object.__new__(WaveshareDisplay)
+    adapter.epd_display = panel
+    adapter.epd_display_init = panel.init
+    adapter.bi_color_display = True
+    panel.getbuffer.side_effect = [b"black", ValueError("red buffer failed")]
+    with pytest.raises(ValueError, match="buffer"):
+        adapter.display_image(Image.new("RGB", (8, 4)))
+    panel.init.assert_not_called()
+    panel.Clear.assert_not_called()
+    panel.display.assert_not_called()
 
 
 def test_late_transfer_never_publishes_or_overlaps_its_retry(tmp_path):
@@ -146,8 +232,9 @@ def test_waveshare_converts_two_planes_and_sleeps_on_error():
     backend.epd_display.display.assert_called_once_with(b"\x60", b"\xc0")
     backend.epd_display.display.side_effect = OSError("transfer error")
     backend.epd_display.sleep.side_effect = OSError("sleep error")
-    with pytest.raises(OSError, match="transfer error"):
+    with pytest.raises(PanelUnavailable) as failure:
         backend.display_image(frame)
+    assert str(failure.value.__cause__) == "transfer error"
     assert backend.epd_display.sleep.call_count == 2
     backend.epd_display_init.return_value = -1
     with pytest.raises(OSError, match="initialization"):

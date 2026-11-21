@@ -25,9 +25,13 @@ jobs:
       - name: Verify both Impression 7.3-inch packed dashboard frames
         run: |
           python -m pip install 'inky==2.4.0' gpiod
+          python -c "from inky import inky_ac073tc1a, inky_e673"
+          PYTHONPATH=src python -m pytest -q tests/test_driver_qc.py
           output="$RUNNER_TEMP/arm64-dashboard"
           python scripts/check_impression_frame.py "$output/morning.png" "$output" > "$output/driver-frames.json"
           cat "$output/driver-frames.json"
+          python scripts/check_impression_frame.py "$output/partial-outage.png" "$output/partial-outage" > "$output/outage-driver-frames.json"
+          cat "$output/outage-driver-frames.json"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
