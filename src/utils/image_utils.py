@@ -6,6 +6,8 @@ import tempfile
 import subprocess
 import signal
 from pathlib import Path
+import time
+from utils.render_budget import check_headroom, memory_limits
 import shutil
 
 logger = logging.getLogger(__name__)
@@ -142,11 +144,22 @@ def take_screenshot(target, dimensions, timeout_ms=None):
         ]
         if timeout_ms:
             command.append(f"--timeout={timeout_ms}")
+        limits = memory_limits()
+        check_headroom(limits)
+        deadline = time.monotonic() + SCREENSHOT_DEADLINE
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               start_new_session=(os.name == "posix")) as process:
             try:
-                process.wait(timeout=SCREENSHOT_DEADLINE)
-            except subprocess.TimeoutExpired:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(browser, SCREENSHOT_DEADLINE)
+                    try:
+                        process.wait(timeout=min(0.1, remaining) if limits else remaining)
+                        break
+                    except subprocess.TimeoutExpired:
+                        check_headroom(limits)
+            except (MemoryError, subprocess.TimeoutExpired):
                 if os.name == "posix":
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
@@ -165,7 +178,7 @@ def take_screenshot(target, dimensions, timeout_ms=None):
         # Load the image using PIL
         with Image.open(img_file_path) as img:
             return img.copy()
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, MemoryError, subprocess.TimeoutExpired) as exc:
         logger.error("Screenshot failed (%s)", type(exc).__name__)
         return None
     finally:
