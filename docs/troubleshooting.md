@@ -214,3 +214,15 @@ For more details on how each setting behaves, see the [Pillow documentation](htt
 For Inky displays from Pimoroni, there is an additional option for `Inky Driver Saturation` in the Settings page. This controls the saturation of the palette to which an image is dithered to in the Inky library. Try setting this to '0' which seems to improve the quality of images displayed.
 
 See [this response](https://github.com/pimoroni/inky/issues/225#issuecomment-3213935144) from the Pimoroni team for more details.
+
+## Morning Dashboard and browser memory
+
+Choose **Morning Dashboard** in the plugin list for a browser-free Italian weather and agenda screen. It defaults to Milan, uses Europe/Rome and 24-hour time, and accepts one iCalendar feed URL per line. Weather uses Open-Meteo. Both sections show their last successful fetch. The service reuses snapshots for 15 minutes and retries expired sources on each scheduled refresh. If a feed is offline, the agenda can show the fetched day and the following day. Beyond that range it says the agenda is unavailable. The private snapshots live beside the device configuration in `.morning-cache/`.
+
+For web pages, choose **Screenshot → Browser → Firefox / Firefox ESR** to try an installed `firefox-esr` or `firefox` executable. Existing screenshot instances use Chromium. Each capture has a temporary profile, a deadline and the same Linux memory-pressure guard. A site that needs a login or loads its content after the browser captures the page may need a prepared image from another machine.
+
+To check the Zero 2 W, run the following from a checkout of this revision using the InkyPi Python environment. It starts a loopback-only mock service in a fresh systemd user scope, uses synthetic weather and calendar feeds, and performs 100 dashboard refreshes with subprocess launches blocked. The check requires cgroup v2 with memory accounting and a working systemd user session. The service must stay at or below 160 MiB peak under a 200 MiB limit, with zero OOM events. The live panel and service are outside the test.
+
+```sh
+python scripts/benchmark_service.py --pi-budget
+```

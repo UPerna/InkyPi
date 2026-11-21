@@ -7,11 +7,20 @@
     <span style="color: var(--text-primary);">Warning: Do not run with untrusted URLs, as it may pose a security risk. This may also fail if the website takes too long to load.</span>
 </div>
 
+<div class="form-group">
+    <label for="browserEngine" class="form-label">Browser</label>
+    <select class="form-input" id="browserEngine" name="browserEngine">
+        <option value="chromium">Chromium</option>
+        <option value="firefox">Firefox / Firefox ESR</option>
+    </select>
+</div>
+
 <script>
     // populate form values from plugin settings
     document.addEventListener('DOMContentLoaded', () => {        
         if (loadPluginSettings) {
             document.getElementById('url').value = pluginSettings.url;
+            document.getElementById('browserEngine').value = pluginSettings.browserEngine || 'chromium';
         }
     });
 </script>

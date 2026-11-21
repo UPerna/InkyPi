@@ -1,0 +1,14 @@
+<div class="form-group">
+    <label class="form-label" for="locationName">Località</label>
+    <input class="form-input" id="locationName" name="locationName" value="{{ (plugin_settings or {}).get('locationName', 'Milano') }}" required>
+</div>
+<div class="form-group">
+    <label for="latitude">Latitudine</label>
+    <input class="form-input" id="latitude" name="latitude" type="number" step="any" min="-90" max="90" value="{{ (plugin_settings or {}).get('latitude', '45.4642') }}" required>
+    <label for="longitude">Longitudine</label>
+    <input class="form-input" id="longitude" name="longitude" type="number" step="any" min="-180" max="180" value="{{ (plugin_settings or {}).get('longitude', '9.1900') }}" required>
+</div>
+<div class="form-group">
+    <label for="calendarFeeds" class="form-label">Calendari iCal (un URL per riga)</label>
+    <textarea class="form-input" id="calendarFeeds" name="calendarFeeds" rows="3">{{ (plugin_settings or {}).get('calendarFeeds', '') }}</textarea>
+</div>

@@ -18,7 +18,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install test dependencies
         run: |
-          python -m pip install -c install/requirements-dev.txt pytest requests urllib3 pillow psutil python-dotenv jinja2 numpy pytz flask 'inky==2.4.0' gpiod
+          python -m pip install -c install/requirements-dev.txt pytest requests urllib3 pillow psutil python-dotenv jinja2 numpy pytz flask icalendar recurring-ical-events 'inky==2.4.0' gpiod
           python -c "from inky import inky_ac073tc1a, inky_e673"
       - name: Run tests with the mock display
         env:
@@ -43,6 +43,7 @@ jobs:
         if: matrix.python == '3.12'
         run: |
           python -m pip install -r install/requirements-dev.txt
+          firefox --version
           python scripts/benchmark_service.py --baseline "$RUNNER_TEMP/inkypi-baseline" > "$RUNNER_TEMP/service-benchmark.json"
           cat "$RUNNER_TEMP/service-benchmark.json"
       - uses: actions/upload-artifact@v4

@@ -1,5 +1,6 @@
 """Measure a disposable, loopback-only InkyPi service with its real refresh worker."""
 import argparse
+from datetime import datetime
 from io import BytesIO
 import json
 import os
@@ -9,6 +10,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 import psutil
@@ -22,7 +25,39 @@ def serve(root):
     import inkypi
 
     server = create_server(inkypi.app, host="127.0.0.1", port=0, threads=1)
+    if (root / "with-dashboard").exists():
+        # Fixtures live only inside this disposable service. Production URLs and
+        # user configuration are never read. Import plugins at first refresh.
+        from flask import request
+
+        @inkypi.app.before_request
+        def use_local_fixture():
+            if request.path == "/update_now" and request.form.get("plugin_id") == "morning_dashboard":
+                from plugins.morning_dashboard import morning_dashboard
+                morning_dashboard.FORECAST_URL = f"http://127.0.0.1:{server.effective_port}/qc/weather"
+
+        @inkypi.app.get("/qc/weather")
+        def weather():
+            now = datetime.now(ZoneInfo("Europe/Rome"))
+            return {"current": {"time": now.strftime("%Y-%m-%dT%H:%M"), "temperature_2m": 13,
+                                "apparent_temperature": 12, "surface_pressure": 1012,
+                                "weather_code": 2, "visibility": 12000},
+                    "daily": {"time": [now.date().isoformat()], "temperature_2m_max": [18],
+                              "temperature_2m_min": [8]}}
+
+        @inkypi.app.get("/qc/agenda")
+        def agenda():
+            day = datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y%m%d")
+            return ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//InkyPi//QC//EN\r\nBEGIN:VEVENT\r\n"
+                    f"UID:qc@localhost\r\nDTSTAMP:{day}T060000Z\r\nDTSTART:{day}T093000Z\r\n"
+                    "SUMMARY:Prova agenda\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+
+        def prevent_dashboard_subprocess(event, values):
+            if event == "subprocess.Popen" and (root / "dashboard-active").exists():
+                raise RuntimeError("Dashboard attempted to launch a subprocess")
+        sys.addaudithook(prevent_dashboard_subprocess)
     inkypi.refresh_task.start()
+    (root / "service-pid").write_text(str(os.getpid()))
     (root / "port.tmp").write_text(str(server.effective_port))
     (root / "port.tmp").replace(root / "port")
     try:
@@ -45,7 +80,7 @@ def memory(service):
             "processes": processes}
 
 
-def refresh(session, url, service, form):
+def refresh(session, url, service, form, marker=None):
     start = time.monotonic()
     response = session.post(url + "/update_now", data=form, timeout=5)
     assert response.status_code == 202, response.text
@@ -60,6 +95,8 @@ def refresh(session, url, service, form):
             with Image.open(BytesIO(png.content)) as frame:
                 assert frame.size == (800, 480)
                 assert frame.convert("L").getextrema() == (0, 255)
+                if marker is not None:
+                    assert frame.convert("RGB").getpixel((740, 430)) == marker, "JavaScript marker missing"
             return {"sampled_peak": peak, "elapsed_ms": round((time.monotonic() - start) * 1000, 1)}
         if result["state"] != "running" and result["state"] != "queued":
             raise RuntimeError(result["message"])
@@ -67,7 +104,17 @@ def refresh(session, url, service, form):
     raise TimeoutError("Service refresh did not finish")
 
 
-def run_checkout(checkout, with_browser):
+def pi_cgroup_result(pid):
+    entry = next(line[3:] for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines() if line.startswith("0::"))
+    directory = Path("/sys/fs/cgroup") / entry.lstrip("/")
+    assert "inkypi-qc-" in directory.name and int((directory/"memory.max").read_text()) == 200 * 2**20
+    peak = int((directory/"memory.peak").read_text())
+    events = dict(line.split() for line in (directory/"memory.events").read_text().splitlines())
+    assert peak <= 160 * 2**20 and int(events["oom"]) == 0 and int(events["oom_kill"]) == 0, (peak, events)
+    return {"peak_bytes": peak, "events": events}
+
+
+def run_checkout(checkout, with_browser, dashboard_runs=0, pi_budget=False):
     with tempfile.TemporaryDirectory(prefix="inkypi-service-qc-") as temporary:
         root = Path(temporary)
         archive = root / "src.tar"
@@ -75,12 +122,20 @@ def run_checkout(checkout, with_browser):
         with tarfile.open(archive) as stream:
             stream.extractall(root, filter="data")
         page = root / "card.html"
-        page.write_text("<style>body{font:30px sans-serif}</style><p>Milano | 07:35</p><p>09:00 Agenda | Meteo 12 C</p>")
+        if dashboard_runs:
+            (root / "with-dashboard").touch()
+        page.write_text("""<style>body{font:30px sans-serif} i{position:absolute;left:730px;top:420px;width:25px;height:25px}</style>
+            <p>Milano | 07:35</p><p>09:00 Agenda | Meteo 12 C</p><i></i>
+            <script>document.querySelector('i').style.background=location.hash=='#firefox'?'blue':'red'</script>""")
         env = dict(os.environ, SRC_DIR=str(root / "src"), PYTHONPATH=str(root / "src"))
         with (root / "service.log").open("w") as log, requests.Session() as session:
             session.trust_env = False
             start = time.monotonic()
-            with subprocess.Popen([sys.executable, __file__, "--serve", str(root)], cwd=root,
+            command = [sys.executable, __file__, "--serve", str(root)]
+            if pi_budget:
+                command = ["systemd-run", "--user", "--scope", "--quiet", "--unit=inkypi-qc-" + uuid.uuid4().hex,
+                           "--property=MemoryMax=200M", "--property=MemoryAccounting=yes", *command]
+            with subprocess.Popen(command, cwd=root,
                                   env=env, stdout=log, stderr=subprocess.STDOUT) as child:
                 try:
                     while not (root / "port").exists():
@@ -88,11 +143,26 @@ def run_checkout(checkout, with_browser):
                             raise RuntimeError("Mock service did not start")
                         time.sleep(0.02)
                     url = "http://127.0.0.1:" + (root / "port").read_text()
-                    service = psutil.Process(child.pid)
+                    service = psutil.Process(int((root / "service-pid").read_text()))
                     result = {"startup_ms": round((time.monotonic() - start) * 1000, 1), "idle": memory(service)}
                     result["clock"] = refresh(session, url, service, {"plugin_id": "clock", "selectedClockFace": "Digital Clock"})
                     if with_browser:
-                        result["screenshot"] = refresh(session, url, service, {"plugin_id": "screenshot", "url": page.as_uri()})
+                        for engine, color in (("chromium", (255, 0, 0)), ("firefox", (0, 0, 255))):
+                            form = {"plugin_id": "screenshot", "url": page.as_uri() + "#" + engine,
+                                    "browserEngine": engine}
+                            result[engine] = refresh(session, url, service, form, marker=color)
+                    if dashboard_runs:
+                        (root / "dashboard-active").touch()
+                        form = {"plugin_id": "morning_dashboard", "calendarFeeds": url + "/qc/agenda"}
+                        peaks = [refresh(session, url, service, form)["sampled_peak"] for _ in range(dashboard_runs)]
+                        caches = list((root / "src/config/.morning-cache").glob("*.json"))
+                        payloads = [json.loads(path.read_text(encoding="utf-8"))["data"] for path in caches]
+                        assert any(p.get("temperature") == 13 for p in payloads)
+                        assert any(p.get("events") and p["events"][0]["title"] == "Prova agenda" for p in payloads)
+                        result["dashboard"] = {"refreshes": len(peaks), "sampled_peak":
+                                               {k: max(p[k] for p in peaks) for k in peaks[0]}}
+                        if pi_budget:
+                            result["dashboard"]["cgroup"] = pi_cgroup_result(service.pid)
                     return result
                 except Exception:
                     print((root / "service.log").read_text()[-1800:], file=sys.stderr)
@@ -109,11 +179,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--serve", type=Path)
+    parser.add_argument("--dashboard-only", action="store_true",
+                        help="run 100 dashboard refreshes in the disposable service without starting a browser")
+    parser.add_argument("--pi-budget", action="store_true",
+                        help="measure the mock service in a fresh 200 MiB systemd user scope, with a 160 MiB peak gate")
     args = parser.parse_args()
     if args.serve:
         serve(args.serve)
     else:
-        report = {"candidate": run_checkout(Path(__file__).resolve().parents[1], True)}
+        report = {"candidate": run_checkout(Path(__file__).resolve().parents[1],
+                                             not (args.dashboard_only or args.pi_budget), 100, args.pi_budget)}
         if args.baseline:
             report["baseline"] = run_checkout(args.baseline, False)
         print(json.dumps(report, indent=2))
