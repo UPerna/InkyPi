@@ -231,4 +231,4 @@ To check the Zero 2 W, run the following from a checkout of this revision using 
 python scripts/benchmark_service.py --pi-budget --preview-dir /tmp/inkypi-dashboard-preview
 ```
 
-The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job also publishes both images and its memory measurements in the `arm64-dashboard` artifact.
+The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job publishes these images, its memory measurements, and previews from both Pimoroni 7.3-inch driver encoders in the `arm64-dashboard` artifact. It intercepts the transfer after each driver packs its frame and verifies that unpacking the bytes reproduces the driver buffer pixel for pixel. The two driver previews use nominal pigment colours.
