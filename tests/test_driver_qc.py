@@ -1,4 +1,5 @@
 import sys
+import importlib
 from threading import Event
 from time import monotonic, sleep
 from types import SimpleNamespace
@@ -15,6 +16,28 @@ from display.panel_io import PanelIO, PanelUnavailable
 from display.waveshare_display import WaveshareDisplay
 from utils.image_utils import apply_image_enhancement, change_orientation, resize_image
 from plugins import plugin_registry
+
+
+@pytest.mark.parametrize(("module_name", "red_code"), [("inky_e673", 3), ("inky_ac073tc1a", 4)])
+def test_pinned_impression_driver_produces_native_colour_codes(monkeypatch, module_name, red_code):
+    # The PC exercises the vendor's complete pixel conversion. Only hardware
+    # discovery, EEPROM access and physical transfer are replaced.
+    pytest.importorskip("inky")
+    vendor = importlib.import_module("inky." + module_name)
+    monkeypatch.setattr(vendor.eeprom, "read_eeprom", lambda **_: None)
+    chip = vendor.Inky(resolution=(800, 480))
+    monkeypatch.setattr(importlib.import_module("inky.auto"), "auto", lambda: chip)
+    show = Mock()
+    monkeypatch.setattr(chip, "show", show)
+    adapter = InkyDisplay(Mock())
+    frame = Image.new("RGB", (800, 480), "white")
+    frame.paste("black", (0, 0, 250, 480))
+    frame.paste("red", (550, 0, 800, 480))
+    adapter.display_image(frame, saturation=0.0)
+    buffer = chip.buf.reshape(480, 800)
+    assert (buffer[:, :250] == 0).all() and (buffer[:, 250:550] == 1).all()
+    assert (buffer[:, 550:] == red_code).all()
+    show.assert_called_once()
 
 
 @pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
