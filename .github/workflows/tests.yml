@@ -3,6 +3,29 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  arm64-dashboard:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Exercise the dashboard and memory limit on ARM64
+        run: |
+          test "$(uname -m)" = aarch64
+          python -m pip install -r install/requirements-dev.txt
+          PYTHONPATH=src python -m pytest -q tests/test_morning_dashboard.py
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          mkdir -p "$RUNNER_TEMP/arm64-dashboard"
+          python scripts/benchmark_service.py --pi-budget --preview-dir "$RUNNER_TEMP/arm64-dashboard" > "$RUNNER_TEMP/arm64-dashboard/verification.json"
+          cat "$RUNNER_TEMP/arm64-dashboard/verification.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm64-dashboard
+          path: ${{ runner.temp }}/arm64-dashboard/
+          if-no-files-found: error
   pytest:
     strategy:
       matrix:

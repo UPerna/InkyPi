@@ -11,23 +11,27 @@ logger = logging.getLogger(__name__)
 FRESH_FOR = timedelta(minutes=15)
 
 
-def snapshot(directory, source, now, fetch):
+def snapshot_path(directory, source):
     name = hashlib.sha256(json.dumps(source, ensure_ascii=False).encode()).hexdigest()
-    path = Path(directory) / (name + ".json")
-    old = stamp = None
+    return Path(directory) / (name + ".json")
+
+
+def read_snapshot(path, now):
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
         stamp = datetime.fromisoformat(saved["at"])
-        if stamp.utcoffset() is not None and stamp <= now:
-            old = saved["data"]
-            if isinstance(old, dict) and now - stamp < FRESH_FOR:
-                return old, stamp, False
-            if not isinstance(old, dict):
-                old = stamp = None
-        else:
-            stamp = None
+        if stamp.utcoffset() is not None and stamp <= now and isinstance(saved["data"], dict):
+            return saved["data"], stamp
     except (OSError, ValueError, KeyError, TypeError):
-        old = stamp = None
+        pass
+    return None, None
+
+
+def snapshot(directory, source, now, fetch):
+    path = snapshot_path(directory, source)
+    old, stamp = read_snapshot(path, now)
+    if stamp is not None and now - stamp < FRESH_FOR:
+        return old, stamp, False
 
     try:
         data = fetch()

@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tarfile
@@ -47,20 +48,30 @@ def serve(root):
             if (root / "weather-offline").exists():
                 return "Offline fixture", 503
             now = FixtureClock.now(ZoneInfo("Europe/Rome"))
-            return {"current": {"time": now.strftime("%Y-%m-%dT%H:%M"), "temperature_2m": 13,
+            assert request.args["timeformat"] == "unixtime" and request.args["hourly"] == "precipitation_probability"
+            midnight = int(now.replace(hour=0, minute=0).timestamp())
+            return {"current": {"time": int(now.timestamp()), "temperature_2m": 13,
                                 "apparent_temperature": 12, "surface_pressure": 1012,
                                 "weather_code": 2, "visibility": 12000},
-                    "daily": {"time": [now.date().isoformat()], "temperature_2m_max": [18],
-                              "temperature_2m_min": [8]}}
+                    "utc_offset_seconds": int(now.utcoffset().total_seconds()),
+                    "daily": {"time": [midnight], "temperature_2m_max": [18], "temperature_2m_min": [8]},
+                    "hourly": {"time": [midnight + i * 3600 for i in range(24)],
+                               "precipitation_probability": [0] * 9 + [10, 25, 65, 80, 55, 20] + [0] * 9}}
 
-        @inkypi.app.get("/qc/agenda")
-        def agenda():
-            if (root / "agenda-offline").exists():
+        @inkypi.app.get("/qc/calendar/<name>")
+        def agenda(name):
+            if name not in {"family", "school"}:
+                return "Unknown fixture", 404
+            if (root / (name + "-offline")).exists():
                 return "Offline fixture", 503
             day = FixtureClock.now(ZoneInfo("Europe/Rome")).strftime("%Y%m%d")
-            return ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//InkyPi//QC//EN\r\nBEGIN:VEVENT\r\n"
-                    f"UID:qc@localhost\r\nDTSTAMP:{day}T060000Z\r\nDTSTART:{day}T093000Z\r\n"
-                    "SUMMARY:Prova agenda\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+            entries = [("shared", "093000", "Biblioteca di quartiere")]
+            entries += ([("family", "073000", "Piscina in famiglia"), ("market", "110000", "Mercato")]
+                        if name == "family" else [("school", "140000", "Laboratorio di musica")])
+            events = "".join(f"BEGIN:VEVENT\r\nUID:{uid}@localhost\r\nDTSTAMP:{day}T060000Z\r\n"
+                             f"DTSTART:{day}T{hour}Z\r\nSUMMARY:{title}\r\nEND:VEVENT\r\n"
+                             for uid, hour, title in entries)
+            return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//InkyPi//QC//EN\r\n" + events + "END:VCALENDAR\r\n"
 
         def prevent_dashboard_subprocess(event, values):
             if event == "subprocess.Popen" and (root / "dashboard-active").exists():
@@ -125,20 +136,22 @@ def pi_cgroup_result(pid):
     return {"peak_bytes": peak, "events": events}
 
 
-def exercise_dashboard(root, session, url, service):
+def exercise_dashboard(root, session, url, service, preview_dir):
     (root / "dashboard-active").touch()
-    form = {"plugin_id": "morning_dashboard", "calendarFeeds": url + "/qc/agenda"}
+    form = {"plugin_id": "morning_dashboard", "calendarFeeds": "\n".join(
+            url + "/qc/calendar/" + name for name in ("family", "school"))}
     clock = datetime(2026, 11, 21, 8, tzinfo=ZoneInfo("Europe/Rome"))
     # Elapsed minutes, unavailable sources and expected last successful reads.
-    phases = ((0, False, False, 0, 0), (16, True, False, 0, 16),
-              (32, True, True, 0, 16), (33, False, True, 33, 16), (34, False, False, 33, 34))
+    phases = ((0, set(), (0, 0, 0)), (16, {"weather", "school"}, (0, 16, 0)),
+              (32, {"weather", "family"}, (0, 16, 32)), (33, {"family"}, (33, 16, 32)),
+              (34, set(), (33, 34, 32)))
     peaks = []
-    for minutes, weather_offline, agenda_offline, weather_at, agenda_at in phases:
+    for minutes, offline, expected in phases:
         fixture_time = clock + timedelta(minutes=minutes)
         (root / "fixture-time").write_text(fixture_time.isoformat())
-        for name, offline in (("weather", weather_offline), ("agenda", agenda_offline)):
+        for name in ("weather", "family", "school"):
             marker = root / (name + "-offline")
-            if offline:
+            if name in offline:
                 marker.touch()
             else:
                 marker.unlink(missing_ok=True)
@@ -149,15 +162,22 @@ def exercise_dashboard(root, session, url, service):
         snapshots = [json.loads(p.read_text(encoding="utf-8"))
                      for p in (root / "src/config/.morning-cache").glob("*.json")]
         weather, = [s for s in snapshots if s["data"].get("temperature") == 13]
-        agenda, = [s for s in snapshots if s["data"].get("events")]
-        assert agenda["data"]["events"][0]["title"] == "Prova agenda"
-        assert datetime.fromisoformat(weather["at"]) == clock + timedelta(minutes=weather_at)
-        assert datetime.fromisoformat(agenda["at"]) == clock + timedelta(minutes=agenda_at)
+        assert len(weather["data"]["rain"]) == 24
+        observed = [weather]
+        for uid in ("family@localhost", "school@localhost"):
+            snapshot, = [s for s in snapshots if any(e.get("uid") == uid for e in s["data"].get("events", []))]
+            observed.append(snapshot)
+        assert [datetime.fromisoformat(s["at"]) for s in observed] == [clock + timedelta(minutes=m) for m in expected]
+        if preview_dir and minutes in (0, 32):
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            png = session.get(url + "/api/current_image", timeout=5)
+            png.raise_for_status()
+            (preview_dir / ("morning.png" if minutes == 0 else "partial-outage.png")).write_bytes(png.content)
     return {"refreshes": len(peaks), "display_updates": len(phases), "unchanged": len(peaks) - len(phases),
             "sampled_peak": {k: max(p[k] for p in peaks) for k in peaks[0]}}
 
 
-def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False):
+def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False, preview_dir=None):
     with tempfile.TemporaryDirectory(prefix="inkypi-service-qc-") as temporary:
         root = Path(temporary)
         archive = root / "src.tar"
@@ -187,7 +207,8 @@ def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False):
                         time.sleep(0.02)
                     url = "http://127.0.0.1:" + (root / "port").read_text()
                     service = psutil.Process(int((root / "service-pid").read_text()))
-                    result = {"startup_ms": round((time.monotonic() - start) * 1000, 1), "idle": memory(service)}
+                    result = {"architecture": platform.machine(), "startup_ms": round((time.monotonic() - start) * 1000, 1),
+                              "idle": memory(service)}
                     result["clock"] = refresh(session, url, service, {"plugin_id": "clock", "selectedClockFace": "Digital Clock"})
                     if with_browser:
                         for engine, color in (("chromium", (255, 0, 0)), ("firefox", (0, 0, 255))):
@@ -195,7 +216,7 @@ def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False):
                                     "browserEngine": engine}
                             result[engine] = refresh(session, url, service, form, marker=color)
                     if dashboard_runs:
-                        result["dashboard"] = exercise_dashboard(root, session, url, service)
+                        result["dashboard"] = exercise_dashboard(root, session, url, service, preview_dir)
                         if pi_budget:
                             result["dashboard"]["cgroup"] = pi_cgroup_result(service.pid)
                     return result
@@ -218,12 +239,14 @@ if __name__ == "__main__":
                         help="run 100 dashboard refreshes in the disposable service without starting a browser")
     parser.add_argument("--pi-budget", action="store_true",
                         help="measure the mock service in a fresh 200 MiB systemd user scope, with a 160 MiB peak gate")
+    parser.add_argument("--preview-dir", type=Path, help="save synthetic healthy and partial-outage screen PNGs")
     args = parser.parse_args()
     if args.serve:
         serve(args.serve)
     else:
         report = {"candidate": run_checkout(Path(__file__).resolve().parents[1],
-                                             not (args.dashboard_only or args.pi_budget), True, args.pi_budget)}
+                                             not (args.dashboard_only or args.pi_budget), True, args.pi_budget,
+                                             args.preview_dir)}
         if args.baseline:
             report["baseline"] = run_checkout(args.baseline, False)
         print(json.dumps(report, indent=2))

@@ -72,18 +72,23 @@ class Calendar(BasePlugin):
             raise RuntimeError("Failed to take screenshot, please check logs.")
         return image
     
-    def fetch_ics_events(self, calendar_urls, colors, tz, start_range, end_range, *, max_bytes=None):
+    def fetch_ics_events(self, calendar_urls, colors, tz, start_range, end_range, *, max_bytes=None,
+                         include_identity=False):
         parsed_events = []
 
         for calendar_url, color in zip(calendar_urls, colors):
             cal = self.fetch_calendar(calendar_url, max_bytes=max_bytes)
+            if include_identity and cal.name != "VCALENDAR":
+                raise ValueError("Expected an iCalendar feed")
             events = recurring_ical_events.of(cal).between(start_range, end_range)
             contrast_color = self.get_contrast_color(color)
 
             for event in events:
+                if include_identity and str(event.get("status", "")).upper() == "CANCELLED":
+                    continue
                 start, end, all_day = self.parse_data_points(event, tz)
                 parsed_event = {
-                    "title": str(event.get("summary")),
+                    "title": str(event.get("summary", "")),
                     "start": start,
                     "backgroundColor": color,
                     "textColor": contrast_color,
@@ -91,6 +96,13 @@ class Calendar(BasePlugin):
                 }
                 if end:
                     parsed_event['end'] = end
+                if include_identity and event.get("uid"):
+                    parsed_event["uid"] = str(event["uid"])
+                    if "recurrence-id" in event:
+                        recurrence = event.decoded("recurrence-id")
+                        if isinstance(recurrence, datetime) and recurrence.tzinfo:
+                            recurrence = recurrence.astimezone(pytz.UTC)
+                        parsed_event["occurrence"] = recurrence.isoformat()
 
                 parsed_events.append(parsed_event)
 

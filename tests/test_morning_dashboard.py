@@ -7,8 +7,9 @@ import icalendar
 import pytest
 from plugins.calendar.calendar import Calendar
 from plugins.morning_dashboard import morning_dashboard as dashboard
-from plugins.morning_dashboard.cache import snapshot
-from plugins.morning_dashboard.render import agenda_rows, freshness
+from plugins.morning_dashboard.agenda import combine_agendas
+from plugins.morning_dashboard.cache import snapshot, snapshot_path
+from plugins.morning_dashboard.render import freshness, hourly_outlook
 from utils import image_utils
 
 ROME = ZoneInfo("Europe/Rome")
@@ -45,9 +46,12 @@ END:VEVENT
 END:VCALENDAR"""
     monkeypatch.setattr(Calendar, "fetch_calendar", lambda self, url, **kw: icalendar.Calendar.from_ical(fixture))
     data = dashboard.fetch_agenda(["https://example.invalid/1"], ROME, NOW.date())
-    assert agenda_rows(data, NOW) == [("Tutto il giorno", "Famiglia"), ("09:00", "Colazione"), ("12:30", "Pranzo")]
-    assert agenda_rows(data, NOW + timedelta(days=1)) == [("09:00", "Colazione")]
-    assert agenda_rows(data, NOW + timedelta(days=2)) is None
+    items = combine_agendas([(data, NOW, False)], NOW).items
+    assert [(e.label, e.title) for e in items] == [("12:30", "Pranzo"), ("Tutto il giorno", "Famiglia"),
+                                                   ("09:00", "Colazione")]
+    tomorrow = combine_agendas([(data, NOW, True)], NOW + timedelta(days=1))
+    assert [e.title for e in tomorrow.items] == ["Colazione"]
+    assert not combine_agendas([(data, NOW, True)], NOW + timedelta(days=2)).covered
 
 
 def fail():
@@ -124,3 +128,102 @@ def test_firefox_missing_does_not_start_chromium(monkeypatch):
     monkeypatch.setattr(image_utils.shutil, "which", lambda name: None)
     monkeypatch.setattr(image_utils.subprocess, "Popen", lambda *a, **k: pytest.fail("unexpected fallback"))
     assert image_utils.take_screenshot("about:blank", (800, 480), engine="firefox") is None
+
+
+def test_individual_feeds_and_legacy_offline_upgrade(tmp_path, monkeypatch):
+    a, b = "https://a.invalid/private", "https://b.invalid/private"
+    conf = SimpleNamespace(config_file=tmp_path/"device.json", get_resolution=lambda: (800, 480),
+                           get_config=lambda key: "horizontal")
+    monkeypatch.setattr(dashboard, "draw_dashboard", lambda size, location, now, weather, agenda: agenda)
+    monkeypatch.setattr(dashboard, "fetch_weather", lambda *args: fail())
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, zone):
+            return NOW
+    monkeypatch.setattr(dashboard, "datetime", Frozen)
+    directory = tmp_path/".morning-cache"
+    def payload(title):
+        return {"first": "2026-10-25", "until": "2026-10-27", "events": [
+            {"start": "2026-10-25", "allDay": True, "title": title}]}
+    old = NOW - timedelta(minutes=19)
+    snapshot(directory, ["agenda-v1", [a, b], ROME.key], old, lambda: payload("Vecchio"))
+    healthy = {}
+    def fetch(feeds, zone, day):
+        assert len(feeds) == 1
+        if feeds[0] not in healthy:
+            return fail()
+        return payload(healthy[feeds[0]])
+    monkeypatch.setattr(dashboard, "fetch_agenda", fetch)
+    plugin = dashboard.MorningDashboard({"id": "morning_dashboard"})
+    def run(feeds):
+        return plugin.generate_image({"calendarFeeds": "\n".join(feeds)}, conf)
+    result = run([b, a])
+    assert (result.total, result.covered, result.stale, result.oldest) == (2, 2, 2, old)
+    assert [e.title for e in result.items] == ["Vecchio"]
+    assert not run([a]).covered
+    healthy[a] = "Nuovo"
+    result = run([a, b])
+    assert (result.covered, result.total) == (1, 2)
+    assert [e.title for e in result.items] == ["Nuovo"]
+    healthy[b] = "Scuola"
+    assert [e.title for e in run([a, b]).items] == ["Nuovo", "Scuola"]
+    assert [e.title for e in run([b]).items] == ["Scuola"]
+    assert a not in snapshot_path(directory, ["agenda-v1", [a], ROME.key]).read_text()
+
+
+def test_shared_invites_preserve_distinct_events_and_prioritise_active():
+    def event(uid, start, end, title):
+        return {"uid": uid, "title": title, "allDay": False, "start": "2026-10-25T" + start + "+01:00",
+                "end": "2026-10-25T" + end + "+01:00"}
+    shared = event("one", "10:00", "11:00", "Nuovo")
+    def data(*events):
+        return {"first": "2026-10-25", "until": "2026-10-27", "events": list(events)}
+    fresh = data(shared, event("two", "10:00", "11:00", "Nuovo"), event("run", "09:00", "09:45", "Attivo"),
+                 event("past", "08:30", "09:30", "Finito"), event("later", "14:00", "15:00", "Più tardi"))
+    saved = data(dict(shared, title="Prima"))
+    broken = data({"title": "Corrotto"})
+    merged = combine_agendas([(fresh, NOW, False), (saved, NOW-timedelta(hours=2), True), (broken, NOW, False)], NOW)
+    assert [i.title for i in merged.items] == ["Attivo", "Nuovo", "Nuovo", "Più tardi", "Finito"]
+    assert (merged.covered, merged.total, merged.stale) == (2, 3, 1)
+
+
+def test_rescheduled_invite_and_distinct_recurrence():
+    original = {"uid": "invite", "start": "2026-10-25T10:00:00+01:00", "allDay": False, "title": "Prima"}
+    moved = dict(original, start="2026-10-25T13:00:00+01:00",
+                 occurrence="2026-10-25T09:00:00+00:00", title="Spostato")
+    separate = dict(original, start="2026-10-25T16:00:00+01:00", title="Seconda ricorrenza")
+    def data(events):
+        return {"first": "2026-10-25", "until": "2026-10-27", "events": events}
+    merged = combine_agendas([(data([original]), NOW-timedelta(hours=1), True),
+                              (data([moved, separate]), NOW, False)], NOW)
+    assert [(i.label, i.title) for i in merged.items] == [("13:00", "Spostato"), ("16:00", "Seconda ricorrenza")]
+    moved["start"] = "2026-10-26T13:00:00+01:00"
+    merged = combine_agendas([(data([moved]), NOW, False), (data([original]), NOW-timedelta(hours=1), True)], NOW)
+    assert merged.covered == 2 and not merged.items
+
+
+@pytest.mark.parametrize("start, expected", [
+    (datetime(2026, 3, 29, 1, 30, tzinfo=ROME), ["01:00", "03:00", "04:00"]),
+    (datetime(2026, 10, 25, 1, 30, tzinfo=ROME), ["01:00", "02 CEST", "02 CET"]),
+    (datetime(2026, 11, 21, 23, 55, tzinfo=ROME), ["23:00", "00:00", "01:00"]),
+])
+def test_outlook_interval_end_clock_changes_and_missing_samples(start, expected):
+    hour = int(start.timestamp()) // 3600 * 3600
+    result = hourly_outlook({"rain": [[hour, 99], [hour+3600, 0], [hour+10800, 80]]}, start)
+    assert [label for label, prob in result[:3]] == expected
+    assert [prob for label, prob in result] == [0, None, 80, None, None, None]
+
+
+def test_weather_decoding_keeps_current_conditions_on_partial_hourly_data():
+    epoch = int(NOW.timestamp())
+    payload = {"current": {"time": epoch, "temperature_2m": 12, "apparent_temperature": 9, "weather_code": 2,
+                            "surface_pressure": 1001}, "utc_offset_seconds": 3600,
+               "daily": {"time": [1792882800], "temperature_2m_min": [7], "temperature_2m_max": [16]},
+               "hourly": {"time": [epoch + i * 3600 for i in range(5)],
+                          "precipitation_probability": [0, None, -2, 100, 101]}}
+    parsed = dashboard.parse_weather(payload, ROME)
+    assert parsed["rain"] == [[epoch, 0], [epoch + 10800, 100]]
+    assert datetime.fromisoformat(parsed["at"]) == NOW
+    assert parsed["day"] == "2026-10-25"
+    payload["hourly"]["time"].pop()
+    assert dashboard.parse_weather(payload, ROME)["rain"] == []
