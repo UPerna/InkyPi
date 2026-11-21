@@ -26,8 +26,10 @@ class PanelIO:
             def transfer():
                 try:
                     driver.display_image(frame, settings, **options)
-                except BaseException as error:
+                except Exception as error:
                     result.set_exception(error)
+                except BaseException:
+                    result.set_exception(RuntimeError("The panel driver exited unexpectedly"))
                 else:
                     result.set_result(None)
 

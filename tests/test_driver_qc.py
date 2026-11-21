@@ -4,6 +4,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import Mock
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 import pytest
@@ -13,6 +14,7 @@ from display.inky_display import InkyDisplay
 from display.panel_io import PanelIO, PanelUnavailable
 from display.waveshare_display import WaveshareDisplay
 from utils.image_utils import apply_image_enhancement, change_orientation, resize_image
+from plugins import plugin_registry
 
 
 @pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
@@ -128,3 +130,22 @@ def test_waveshare_converts_two_planes_and_sleeps_on_error():
     with pytest.raises(OSError, match="initialization"):
         backend.display_image(frame)
     assert backend.epd_display.Clear.call_count == 2
+
+
+def test_lazy_plugin_import_is_singleton_under_concurrent_first_use(monkeypatch):
+    config = {"id": "clock", "class": "Clock"}
+    constructor = Mock()
+    importer = Mock(return_value=SimpleNamespace(Clock=constructor))
+    monkeypatch.setattr(plugin_registry, "_registered", {})
+    monkeypatch.setattr(plugin_registry, "PLUGIN_CLASSES", {})
+    monkeypatch.setattr(plugin_registry.importlib, "import_module", importer)
+    plugin_registry.load_plugins([config, {"id": "wpotd", "class": "Wpotd"}])
+    importer.assert_not_called()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        instances = list(pool.map(plugin_registry.get_plugin_instance, [config] * 24))
+    assert all(instance is instances[0] for instance in instances)
+    importer.assert_called_once_with("plugins.clock.clock")
+    constructor.assert_called_once_with(config)
+    plugin_registry.load_plugins(dict(config, disabled=True))
+    with pytest.raises(ValueError, match="not registered"):
+        plugin_registry.get_plugin_instance(config)

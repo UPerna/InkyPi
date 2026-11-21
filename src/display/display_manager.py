@@ -91,7 +91,10 @@ class DisplayManager:
             if self.panel_io is None:
                 self.display.display_image(frame, image_settings, **options)
             else:
-                self.panel_io.write(self.display, frame, image_settings, options, force)
+                # A late vendor call can outlive the plugin request. Own the
+                # pixels it reads if preparation reused the plugin's image.
+                transfer_frame = frame.copy() if frame is image else frame
+                self.panel_io.write(self.display, transfer_frame, image_settings, options, force)
             os.replace(staged, path)
             self._confirmed_hash = digest
         finally:
