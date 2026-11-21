@@ -7,15 +7,18 @@ from time import monotonic, sleep
 from unittest.mock import Mock
 
 from flask import Flask
+from jinja2 import FileSystemLoader
 from PIL import Image
 import pytest
 
 from blueprints.main import main_bp
+from blueprints.playlist import playlist_bp
 from blueprints.plugin import plugin_bp
 from config import Config
 from display.display_manager import DisplayManager
 from display.waveshare_display import WaveshareDisplay
 from model import PluginInstance, RefreshInfo
+from plugins.clock.clock import Clock
 from refresh_task import ManualRefresh, RefreshTask
 
 
@@ -36,9 +39,11 @@ def rig(tmp_path, monkeypatch):
     manager = DisplayManager(config)
     worker = RefreshTask(config, manager)
     app = Flask(__name__)
+    app.jinja_loader = FileSystemLoader([Path(Config.BASE_DIR) / "templates", Path(Config.BASE_DIR) / "plugins"])
     app.config.update(DEVICE_CONFIG=config, REFRESH_TASK=worker)
     app.register_blueprint(main_bp)
     app.register_blueprint(plugin_bp)
+    app.register_blueprint(playlist_bp)
     yield worker, manager, config, app.test_client()
     worker.stop()
 
@@ -59,6 +64,17 @@ def finish(client, response):
 def submit(client, color="red", force=False):
     url = "/update_now?force_display=1" if force else "/update_now"
     return client.post(url, data={"plugin_id": "clock", "color": color})
+
+
+def test_clock_form_and_playlist_render_with_refresh_controls(rig, monkeypatch):
+    _, _, _, client = rig
+    monkeypatch.setattr("blueprints.plugin.get_plugin_instance", Clock)
+    form = client.get("/plugin/clock")
+    assert form.status_code == 200
+    assert b"Force panel refresh" in form.data and b"/update_now" in form.data
+    playlist = client.get("/playlist")
+    assert playlist.status_code == 200
+    assert b"/display_plugin_instance" in playlist.data and b"trackRefresh(" in playlist.data
 
 
 def test_manual_burst_while_scheduled_driver_is_blocked(rig, capsys):
