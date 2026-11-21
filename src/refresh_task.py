@@ -174,7 +174,8 @@ class RefreshTask:
         image = action.execute(plugin, self.device_config, current_dt)
         digest, displayed = self.display_manager.display_image(
             image, plugin.config.get("image_settings", []), force=force_display)
-        info = RefreshInfo(**action.get_refresh_info(), refresh_time=current_dt.isoformat(), image_hash=digest)
+        confirmed_at = self._get_current_datetime().isoformat()
+        info = RefreshInfo(**action.get_refresh_info(), refresh_time=confirmed_at, image_hash=digest)
         if isinstance(action, PlaylistRefresh) and not action.force and action.plugin_instance in action.playlist.plugins:
             playlist = action.playlist
             previous = playlist.current_plugin_index

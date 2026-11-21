@@ -14,6 +14,7 @@ from blueprints.main import main_bp
 from blueprints.plugin import plugin_bp
 from config import Config
 from display.display_manager import DisplayManager
+from display.waveshare_display import WaveshareDisplay
 from model import PluginInstance, RefreshInfo
 from refresh_task import ManualRefresh, RefreshTask
 
@@ -158,6 +159,57 @@ def test_stopped_worker_and_saved_playlist_endpoint(rig):
                       "plugin_id": "clock", "plugin_instance": "one"})
     assert finish(client, req)["state"] == "completed"
     assert config.get_refresh_info().plugin_instance == "one"
+
+
+def test_waveshare_driver_exception_preserves_last_frame(rig):
+    _, manager, _, client = rig
+    # Use the real adapter with a simulated SPI device.
+    manager.display_type = "epd7in3"
+    adapter = object.__new__(WaveshareDisplay)
+    adapter.epd_display_init = Mock()
+    adapter.epd_display = Mock()
+    adapter.bi_color_display = False
+    manager.display = adapter
+    manager.display_image(Image.new("RGB", (8, 4), "white"))
+    old = client.get("/api/current_image").data
+    adapter.epd_display.display.side_effect = OSError("transfer failed")
+    with pytest.raises(OSError):
+        manager.display_image(Image.new("RGB", (8, 4), "black"))
+    assert client.get("/api/current_image").data == old
+    adapter.epd_display.display.side_effect = None
+    assert manager.display_image(Image.new("RGB", (8, 4), "white"))[1]
+    assert adapter.epd_display.display.call_count == 3
+
+
+def test_failed_scheduled_write_retries_same_playlist_item(rig):
+    worker, manager, config, _ = rig
+    playlist = config.get_playlist_manager().playlists[0]
+    first = PluginInstance("clock", "first", {}, {"interval": 3600})
+    second = PluginInstance("clock", "second", {}, {"interval": 3600})
+    playlist.plugins.extend([first, second])
+    now = datetime.now(timezone.utc)
+    config.refresh_info = RefreshInfo("Playlist", "clock", (now - timedelta(days=1)).isoformat(), "old")
+    attempts = []
+    failed, success = Event(), Event()
+    def panel(*_):
+        attempts.append(monotonic())
+        if len(attempts) == 1:
+            failed.set()
+            raise OSError("panel unavailable")
+        success.set()
+    manager.display.display_image = panel
+    worker.start()
+    assert failed.wait(3)
+    worker.stop()
+    assert playlist.current_plugin_index is None
+    assert config.get_refresh_info().image_hash == "old"
+    worker.start()
+    assert success.wait(3)
+    worker.stop()
+    assert len(attempts) == 2
+    assert playlist.current_plugin_index == 0
+    assert config.get_refresh_info().plugin_instance == "first"
+    assert not Path(config.plugin_image_dir, second.get_image_path()).exists()
 
 
 def test_shutdown_resolves_pending_request_while_active_driver_finishes(rig):

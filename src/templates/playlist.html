@@ -111,7 +111,10 @@
 
                 const result = await response.json();
                 if (response.status === 202) {
-                    trackRefresh(result);
+                    trackRefresh(result, completed => {
+                        sessionStorage.setItem("storedMessage", JSON.stringify({type: "success", text: completed.message}));
+                        location.reload();
+                    });
                 } else {
                     showResponseModal('failure', `Error!  ${result.error}`);
                 }

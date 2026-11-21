@@ -32,7 +32,7 @@ function closeResponseModal() {
     modal.style.display = 'none';
 }
 
-async function trackRefresh(job) {
+async function trackRefresh(job, onCompleted) {
     trackedRefresh = job.id;
     showResponseModal('pending', job.message);
     try {
@@ -43,6 +43,10 @@ async function trackRefresh(job) {
             const result = await response.json();
             if (trackedRefresh !== job.id) return;
             if (result.state !== 'queued' && result.state !== 'running') {
+                if (result.state === 'completed' && onCompleted) {
+                    onCompleted(result);
+                    return;
+                }
                 showResponseModal(result.state === 'failed' ? 'failure' : result.state === 'completed' ? 'success' : 'pending',
                                   result.message);
                 return;
