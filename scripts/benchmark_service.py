@@ -1,6 +1,6 @@
 """Measure a disposable, loopback-only InkyPi service with its real refresh worker."""
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 import json
 import os
@@ -30,15 +30,23 @@ def serve(root):
         # user configuration are never read. Import plugins at first refresh.
         from flask import request
 
+        class FixtureClock(datetime):
+            @classmethod
+            def now(cls, zone):
+                return datetime.fromisoformat((root / "fixture-time").read_text()).astimezone(zone)
+
         @inkypi.app.before_request
         def use_local_fixture():
             if request.path == "/update_now" and request.form.get("plugin_id") == "morning_dashboard":
                 from plugins.morning_dashboard import morning_dashboard
                 morning_dashboard.FORECAST_URL = f"http://127.0.0.1:{server.effective_port}/qc/weather"
+                morning_dashboard.datetime = FixtureClock
 
         @inkypi.app.get("/qc/weather")
         def weather():
-            now = datetime.now(ZoneInfo("Europe/Rome"))
+            if (root / "weather-offline").exists():
+                return "Offline fixture", 503
+            now = FixtureClock.now(ZoneInfo("Europe/Rome"))
             return {"current": {"time": now.strftime("%Y-%m-%dT%H:%M"), "temperature_2m": 13,
                                 "apparent_temperature": 12, "surface_pressure": 1012,
                                 "weather_code": 2, "visibility": 12000},
@@ -47,7 +55,9 @@ def serve(root):
 
         @inkypi.app.get("/qc/agenda")
         def agenda():
-            day = datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y%m%d")
+            if (root / "agenda-offline").exists():
+                return "Offline fixture", 503
+            day = FixtureClock.now(ZoneInfo("Europe/Rome")).strftime("%Y%m%d")
             return ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//InkyPi//QC//EN\r\nBEGIN:VEVENT\r\n"
                     f"UID:qc@localhost\r\nDTSTAMP:{day}T060000Z\r\nDTSTART:{day}T093000Z\r\n"
                     "SUMMARY:Prova agenda\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
@@ -97,7 +107,8 @@ def refresh(session, url, service, form, marker=None):
                 assert frame.convert("L").getextrema() == (0, 255)
                 if marker is not None:
                     assert frame.convert("RGB").getpixel((740, 430)) == marker, "JavaScript marker missing"
-            return {"sampled_peak": peak, "elapsed_ms": round((time.monotonic() - start) * 1000, 1)}
+            return {"sampled_peak": peak, "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
+                    "displayed": result["message"] == "Display updated."}
         if result["state"] != "running" and result["state"] != "queued":
             raise RuntimeError(result["message"])
         time.sleep(0.03)
@@ -114,7 +125,39 @@ def pi_cgroup_result(pid):
     return {"peak_bytes": peak, "events": events}
 
 
-def run_checkout(checkout, with_browser, dashboard_runs=0, pi_budget=False):
+def exercise_dashboard(root, session, url, service):
+    (root / "dashboard-active").touch()
+    form = {"plugin_id": "morning_dashboard", "calendarFeeds": url + "/qc/agenda"}
+    clock = datetime(2026, 11, 21, 8, tzinfo=ZoneInfo("Europe/Rome"))
+    # Elapsed minutes, unavailable sources and expected last successful reads.
+    phases = ((0, False, False, 0, 0), (16, True, False, 0, 16),
+              (32, True, True, 0, 16), (33, False, True, 33, 16), (34, False, False, 33, 34))
+    peaks = []
+    for minutes, weather_offline, agenda_offline, weather_at, agenda_at in phases:
+        fixture_time = clock + timedelta(minutes=minutes)
+        (root / "fixture-time").write_text(fixture_time.isoformat())
+        for name, offline in (("weather", weather_offline), ("agenda", agenda_offline)):
+            marker = root / (name + "-offline")
+            if offline:
+                marker.touch()
+            else:
+                marker.unlink(missing_ok=True)
+        for index in range(20):
+            sample = refresh(session, url, service, form)
+            assert sample["displayed"] == (index == 0), (minutes, index, sample)
+            peaks.append(sample["sampled_peak"])
+        snapshots = [json.loads(p.read_text(encoding="utf-8"))
+                     for p in (root / "src/config/.morning-cache").glob("*.json")]
+        weather, = [s for s in snapshots if s["data"].get("temperature") == 13]
+        agenda, = [s for s in snapshots if s["data"].get("events")]
+        assert agenda["data"]["events"][0]["title"] == "Prova agenda"
+        assert datetime.fromisoformat(weather["at"]) == clock + timedelta(minutes=weather_at)
+        assert datetime.fromisoformat(agenda["at"]) == clock + timedelta(minutes=agenda_at)
+    return {"refreshes": len(peaks), "display_updates": len(phases), "unchanged": len(peaks) - len(phases),
+            "sampled_peak": {k: max(p[k] for p in peaks) for k in peaks[0]}}
+
+
+def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False):
     with tempfile.TemporaryDirectory(prefix="inkypi-service-qc-") as temporary:
         root = Path(temporary)
         archive = root / "src.tar"
@@ -152,15 +195,7 @@ def run_checkout(checkout, with_browser, dashboard_runs=0, pi_budget=False):
                                     "browserEngine": engine}
                             result[engine] = refresh(session, url, service, form, marker=color)
                     if dashboard_runs:
-                        (root / "dashboard-active").touch()
-                        form = {"plugin_id": "morning_dashboard", "calendarFeeds": url + "/qc/agenda"}
-                        peaks = [refresh(session, url, service, form)["sampled_peak"] for _ in range(dashboard_runs)]
-                        caches = list((root / "src/config/.morning-cache").glob("*.json"))
-                        payloads = [json.loads(path.read_text(encoding="utf-8"))["data"] for path in caches]
-                        assert any(p.get("temperature") == 13 for p in payloads)
-                        assert any(p.get("events") and p["events"][0]["title"] == "Prova agenda" for p in payloads)
-                        result["dashboard"] = {"refreshes": len(peaks), "sampled_peak":
-                                               {k: max(p[k] for p in peaks) for k in peaks[0]}}
+                        result["dashboard"] = exercise_dashboard(root, session, url, service)
                         if pi_budget:
                             result["dashboard"]["cgroup"] = pi_cgroup_result(service.pid)
                     return result
@@ -188,7 +223,7 @@ if __name__ == "__main__":
         serve(args.serve)
     else:
         report = {"candidate": run_checkout(Path(__file__).resolve().parents[1],
-                                             not (args.dashboard_only or args.pi_budget), 100, args.pi_budget)}
+                                             not (args.dashboard_only or args.pi_budget), True, args.pi_budget)}
         if args.baseline:
             report["baseline"] = run_checkout(args.baseline, False)
         print(json.dumps(report, indent=2))

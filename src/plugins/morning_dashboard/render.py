@@ -79,15 +79,21 @@ def draw_dashboard(size, location, now, weather, agenda):
     line(margin, f"{DAYS[now.weekday()]} {now.day} {MONTHS[now.month - 1]}", 30)
     y = margin + px(49)
     info, stamp, stale = weather
-    line(y, f"Meteo · {location[:100]}", 24)
-    line(y + px(30), freshness(stamp, stale) + " · Open-Meteo", 15)
+    location = " ".join(location.split())[:100]
+    line(y, f"Meteo · {location}", 24)
+    source = "Open-Meteo"
+    if info:
+        source += datetime.fromisoformat(info["at"]).strftime(" %d/%m %H:%M")
+    line(y + px(30), freshness(stamp, stale) + " · " + source, 15)
     if info:
         line(y + px(55), f"{info['temperature']} °C   {CONDITIONS.get(info['code'], 'Meteo variabile')}", 30)
         forecast_date = date.fromisoformat(info["day"]).strftime("%d/%m")
         details = (f"{forecast_date}   Min {info['low']}°   Max {info['high']}°"
                    f"    ·    Percepita {info['feels']}°    ·    {info['pressure']} hPa")
-        if info.get("visibility") is not None:
-            details += f"    ·    Visibilità {info['visibility']} km"
+        visibility = info.get("visibility_m")
+        if visibility is not None:
+            distance = f"{visibility} m" if visibility < 1000 else f"{visibility / 1000:.0f} km"
+            details += f"    ·    Visibilità {distance}"
         line(y + px(95), details, 19)
     else:
         line(y + px(62), "Meteo non disponibile")

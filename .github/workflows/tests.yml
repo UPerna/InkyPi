@@ -46,6 +46,13 @@ jobs:
           firefox --version
           python scripts/benchmark_service.py --baseline "$RUNNER_TEMP/inkypi-baseline" > "$RUNNER_TEMP/service-benchmark.json"
           cat "$RUNNER_TEMP/service-benchmark.json"
+      - name: Check the 200 MiB dashboard service limit on Linux
+        if: matrix.python == '3.12'
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python scripts/benchmark_service.py --pi-budget > "$RUNNER_TEMP/dashboard-cgroup.json"
+          cat "$RUNNER_TEMP/dashboard-cgroup.json"
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'
         with:
@@ -53,6 +60,7 @@ jobs:
           path: |
             ${{ runner.temp }}/display-benchmark.json
             ${{ runner.temp }}/service-benchmark.json
+            ${{ runner.temp }}/dashboard-cgroup.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'

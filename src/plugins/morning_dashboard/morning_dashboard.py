@@ -37,7 +37,7 @@ def fetch_weather(lat, lon, zone):
     return {"at": datetime.fromisoformat(current["time"]).isoformat(timespec="minutes"),
             "temperature": number(current["temperature_2m"]), "code": number(current["weather_code"]),
             "feels": number(current["apparent_temperature"]), "pressure": number(current["surface_pressure"]),
-            "visibility": None if current.get("visibility") is None else number(current["visibility"] / 1000),
+            "visibility_m": None if current.get("visibility") is None else number(current["visibility"]),
             "day": date.fromisoformat(daily["time"][0]).isoformat(),
             "high": number(daily["temperature_2m_max"][0]), "low": number(daily["temperature_2m_min"][0])}
 

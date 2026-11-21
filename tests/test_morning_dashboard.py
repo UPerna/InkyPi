@@ -86,7 +86,7 @@ def test_dashboard_entry_point_restarts_outage_and_recovers(tmp_path, monkeypatc
         if "weather" in unavailable:
             return fail()
         return {"at": "2026-10-25T09:15", "temperature": 12, "code": 0, "feels": 11, "pressure": 1013,
-                "visibility": 20, "day": "2026-10-25", "high": 16, "low": 8}
+                "visibility_m": 20000, "day": "2026-10-25", "high": 16, "low": 8}
     def agenda(*args):
         calls["agenda"] += 1
         if "agenda" in unavailable:

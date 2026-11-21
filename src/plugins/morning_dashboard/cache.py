@@ -27,7 +27,7 @@ def snapshot(directory, source, now, fetch):
         else:
             stamp = None
     except (OSError, ValueError, KeyError, TypeError):
-        pass
+        old = stamp = None
 
     try:
         data = fetch()
