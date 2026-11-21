@@ -1,0 +1,26 @@
+name: Test InkyPi
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -c install/requirements-dev.txt pytest requests urllib3 pillow psutil python-dotenv jinja2 numpy pytz
+      - name: Run tests with the mock display
+        env:
+          PYTHONPATH: src
+        run: python -m pytest -q
+      - name: Render the reference clock
+        run: python scripts/render_reference_clock.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-clock-800x480
+          path: mock_display_output/reference-clock.png
+          if-no-files-found: error

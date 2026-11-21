@@ -172,3 +172,10 @@ mock_display_output/
 # Static Files added by install/update_vendors.sh
 /src/static/scripts/
 /src/static/styles/
+
+# Device-local configuration, recovery copies and rendered output
+/.env.swp
+/src/config/device.json
+/src/config/device*.json.bak
+/src/config/.device*.json*.tmp
+/src/static/images/current_image.png
