@@ -1,5 +1,6 @@
 import logging
-from inky.auto import auto
+from inspect import signature
+import warnings
 from display.abstract_display import AbstractDisplay
 
 
@@ -27,7 +28,9 @@ class InkyDisplay(AbstractDisplay):
             ValueError: If the resolution cannot be retrieved or stored.
         """
         
+        from inky.auto import auto
         self.inky_display = auto()
+        self._supports_saturation = "saturation" in signature(self.inky_display.set_image).parameters
         self.inky_display.set_border(self.inky_display.BLACK)
 
         # store display resolution in device config
@@ -62,5 +65,13 @@ class InkyDisplay(AbstractDisplay):
         if inky_saturation is None:
             inky_saturation = self.device_config.get_config('image_settings').get("inky_saturation", 0.5)
         logger.info(f"Inky Saturation: {inky_saturation}")
-        self.inky_display.set_image(image, saturation=inky_saturation)
-        self.inky_display.show()
+        if self._supports_saturation:
+            self.inky_display.set_image(image, saturation=inky_saturation)
+        else:
+            self.inky_display.set_image(image)
+        # v2.4.0 can report an actual BUSY deadline as a warning and return.
+        # Keep the vendor's separate held-high fallback and normal waits intact.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=r"^Busy Wait: Timed out after ",
+                                    category=UserWarning, module=r"^inky(?:\.|$)")
+            self.inky_display.show()

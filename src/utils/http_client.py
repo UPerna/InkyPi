@@ -16,6 +16,7 @@ Usage:
 """
 
 import requests
+import time
 import logging
 from typing import Optional
 
@@ -71,4 +72,34 @@ def close_http_session():
         logger.debug("Closing shared HTTP session")
         _HTTP_SESSION.close()
         _HTTP_SESSION = None
+
+
+
+def bounded_chunks(response, limit, deadline):
+    """Yield decoded chunks within the byte and transfer-time budgets."""
+    headers = getattr(response, "headers", {})
+    length = headers.get("Content-Length")
+    length = int(length) if length is not None else None
+    if length is not None and not 0 <= length <= limit:
+        raise ValueError("Response exceeds the byte limit")
+
+    raw = response.raw
+    if hasattr(raw, "read1") and hasattr(raw, "decode_content"):
+        # Return available data so a slow sender cannot defer every deadline check
+        # until an entire 64 KiB chunk has arrived.
+        chunks = iter(lambda: raw.read1(65536, decode_content=True), b"")
+    else:
+        chunks = response.iter_content(chunk_size=65536)
+    total = 0
+    for chunk in chunks:
+        total += len(chunk)
+        if total > limit:
+            raise ValueError("Response exceeds the byte limit")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Response deadline reached")
+        yield chunk
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Response deadline reached")
+    if length is not None and headers.get("Content-Encoding", "identity").lower() == "identity" and total != length:
+        raise ValueError("Incomplete response")
 

@@ -1,23 +1,18 @@
-import requests
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
-from io import BytesIO
 import os
 import logging
 import hashlib
 import tempfile
 import subprocess
+import signal
+from pathlib import Path
 import shutil
 
 logger = logging.getLogger(__name__)
 
 def get_image(image_url):
-    response = requests.get(image_url, timeout=30)
-    img = None
-    if 200 <= response.status_code < 300 or response.status_code == 304:
-        img = Image.open(BytesIO(response.content))
-    else:
-        logger.error(f"Received non-200 response from {image_url}: status_code: {response.status_code}")
-    return img
+    from utils.image_loader import AdaptiveImageLoader
+    return AdaptiveImageLoader().from_url(image_url, None, timeout_ms=30000, resize=False)
 
 def change_orientation(image, orientation, inverted=False):
     if orientation == 'horizontal':
@@ -83,31 +78,20 @@ def apply_image_enhancement(img, image_settings={}):
 
 def compute_image_hash(image):
     """Compute SHA-256 hash of an image."""
-    image = image.convert("RGB")
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     img_bytes = image.tobytes()
     return hashlib.sha256(img_bytes).hexdigest()
 
 def take_screenshot_html(html_str, dimensions, timeout_ms=None):
-    image = None
-    try:
-        # Create a temporary HTML file
-        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as html_file:
-            html_file.write(html_str.encode("utf-8"))
-            html_file_path = html_file.name
-
-        image = take_screenshot(html_file_path, dimensions, timeout_ms)
-
-        # Remove html file
-        os.remove(html_file_path)
-
-    except Exception as e:
-        logger.error(f"Failed to take screenshot: {str(e)}")
-
-    return image
+    with tempfile.TemporaryDirectory(prefix="inkypi-html-") as directory:
+        page = Path(directory) / "page.html"
+        page.write_text(html_str, encoding="utf-8")
+        return take_screenshot(page.as_uri(), dimensions, timeout_ms)
 
 def _find_chromium_binary():
     """Find the first available Chromium-based binary in system PATH."""
-    candidates = ["chromium-headless-shell", "chromium", "chrome"]
+    candidates = ["chromium-headless-shell", "chromium", "google-chrome", "chrome"]
     for candidate in candidates:
         path = shutil.which(candidate)
         if path:
@@ -116,8 +100,12 @@ def _find_chromium_binary():
     return None
 
 
+SCREENSHOT_DEADLINE = 90
+
+
 def take_screenshot(target, dimensions, timeout_ms=None):
-    image = None
+    img_file_path = None
+    profile = None
     try:
         # Find available browser binary
         browser = _find_chromium_binary()
@@ -128,11 +116,13 @@ def take_screenshot(target, dimensions, timeout_ms=None):
         # Create a temporary output file for the screenshot
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
             img_file_path = img_file.name
+        profile = tempfile.TemporaryDirectory(prefix="inkypi-chrome-")
 
         command = [
             browser,
             target,
             "--headless",
+            f"--user-data-dir={profile.name}",
             f"--screenshot={img_file_path}",
             f"--window-size={dimensions[0]},{dimensions[1]}",
             "--disable-dev-shm-usage",
@@ -152,24 +142,37 @@ def take_screenshot(target, dimensions, timeout_ms=None):
         ]
         if timeout_ms:
             command.append(f"--timeout={timeout_ms}")
-        result = subprocess.run(command, capture_output=True, check=False)
+        with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=(os.name == "posix")) as process:
+            try:
+                process.wait(timeout=SCREENSHOT_DEADLINE)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait()
+                raise
 
         # Check if the process failed or the output file is missing
-        if result.returncode != 0 or not os.path.exists(img_file_path):
-            logger.error(f"Failed to take screenshot (return code: {result.returncode})")
+        if process.returncode != 0 or not os.path.exists(img_file_path):
+            logger.error(f"Failed to take screenshot (return code: {process.returncode})")
             return None
 
         # Load the image using PIL
         with Image.open(img_file_path) as img:
-            image = img.copy()
-
-        # Remove image files
-        os.remove(img_file_path)
-
-    except Exception as e:
-        logger.error(f"Failed to take screenshot: {str(e)}")
-
-    return image
+            return img.copy()
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        logger.error("Screenshot failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        if img_file_path:
+            Path(img_file_path).unlink(missing_ok=True)
+        if profile is not None:
+            profile.cleanup()
 
 def pad_image_blur(img: Image, dimensions: tuple[int, int]) -> Image:
     bkg = ImageOps.fit(img, dimensions)
