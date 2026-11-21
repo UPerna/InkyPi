@@ -8,6 +8,8 @@ import recurring_ical_events
 from io import BytesIO
 import logging
 import requests
+import time
+from utils.http_client import bounded_chunks
 from datetime import datetime, timedelta
 import pytz
 
@@ -70,18 +72,23 @@ class Calendar(BasePlugin):
             raise RuntimeError("Failed to take screenshot, please check logs.")
         return image
     
-    def fetch_ics_events(self, calendar_urls, colors, tz, start_range, end_range):
+    def fetch_ics_events(self, calendar_urls, colors, tz, start_range, end_range, *, max_bytes=None,
+                         include_identity=False):
         parsed_events = []
 
         for calendar_url, color in zip(calendar_urls, colors):
-            cal = self.fetch_calendar(calendar_url)
+            cal = self.fetch_calendar(calendar_url, max_bytes=max_bytes)
+            if include_identity and cal.name != "VCALENDAR":
+                raise ValueError("Expected an iCalendar feed")
             events = recurring_ical_events.of(cal).between(start_range, end_range)
             contrast_color = self.get_contrast_color(color)
 
             for event in events:
+                if include_identity and str(event.get("status", "")).upper() == "CANCELLED":
+                    continue
                 start, end, all_day = self.parse_data_points(event, tz)
                 parsed_event = {
-                    "title": str(event.get("summary")),
+                    "title": str(event.get("summary", "")),
                     "start": start,
                     "backgroundColor": color,
                     "textColor": contrast_color,
@@ -89,6 +96,13 @@ class Calendar(BasePlugin):
                 }
                 if end:
                     parsed_event['end'] = end
+                if include_identity and event.get("uid"):
+                    parsed_event["uid"] = str(event["uid"])
+                    if "recurrence-id" in event:
+                        recurrence = event.decoded("recurrence-id")
+                        if isinstance(recurrence, datetime) and recurrence.tzinfo:
+                            recurrence = recurrence.astimezone(pytz.UTC)
+                        parsed_event["occurrence"] = recurrence.isoformat()
 
                 parsed_events.append(parsed_event)
 
@@ -117,10 +131,15 @@ class Calendar(BasePlugin):
         return start, end
         
     def parse_data_points(self, event, tz):
+        def local(dt):
+            if dt.tzinfo is None:
+                return tz.localize(dt) if hasattr(tz, "localize") else dt.replace(tzinfo=tz)
+            return dt.astimezone(tz)
+
         all_day = False
         dtstart = event.decoded("dtstart")
         if isinstance(dtstart, datetime):
-            start = dtstart.astimezone(tz).isoformat()
+            start = local(dtstart).isoformat()
         else:
             start = dtstart.isoformat()
             all_day = True
@@ -129,24 +148,31 @@ class Calendar(BasePlugin):
         if "dtend" in event:
             dtend = event.decoded("dtend")
             if isinstance(dtend, datetime):
-                end = dtend.astimezone(tz).isoformat()
+                end = local(dtend).isoformat()
             else:
                 end = dtend.isoformat()
         elif "duration" in event:
             duration = event.decoded("duration")
-            end = (dtstart + duration).isoformat()
+            dtend = dtstart + duration
+            end = (local(dtend) if isinstance(dtend, datetime) else dtend).isoformat()
         return start, end, all_day
 
-    def fetch_calendar(self, calendar_url):
+    def fetch_calendar(self, calendar_url, *, max_bytes=None):
         # workaround for webcal urls
         if calendar_url.startswith("webcal://"):
             calendar_url = calendar_url.replace("webcal://", "https://")
         try:
-            response = requests.get(calendar_url, timeout=30)
-            response.raise_for_status()
-            return icalendar.Calendar.from_ical(response.text)
+            if max_bytes is None:
+                with requests.get(calendar_url, timeout=30) as response:
+                    response.raise_for_status()
+                    return icalendar.Calendar.from_ical(response.content)
+            deadline = time.monotonic() + 30
+            with requests.get(calendar_url, timeout=(5, 10), stream=True) as response:
+                response.raise_for_status()
+                raw = b"".join(bounded_chunks(response, max_bytes, deadline))
+            return icalendar.Calendar.from_ical(raw)
         except Exception as e:
-            raise RuntimeError(f"Failed to fetch iCalendar url: {str(e)}")
+            raise RuntimeError(f"Failed to read calendar feed ({type(e).__name__})") from None
 
     def get_contrast_color(self, color):
         """

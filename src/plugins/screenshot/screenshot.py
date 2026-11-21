@@ -16,9 +16,10 @@ class Screenshot(BasePlugin):
         if device_config.get_config("orientation") == "vertical":
             dimensions = dimensions[::-1]
 
-        logger.info(f"Taking screenshot of url: {url}")
+        engine = settings.get("browserEngine", "chromium")
+        logger.info("Taking page screenshot with %s", engine)
 
-        image = take_screenshot(url, dimensions, timeout_ms=40000)
+        image = take_screenshot(url, dimensions, timeout_ms=40000, engine=engine)
 
         if not image:
             raise RuntimeError("Failed to take screenshot, please check logs.")

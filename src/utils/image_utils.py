@@ -105,55 +105,70 @@ def _find_chromium_binary():
 SCREENSHOT_DEADLINE = 90
 
 
-def take_screenshot(target, dimensions, timeout_ms=None):
+def _screenshot_command(engine, browser, target, dimensions, profile_dir, output, timeout_ms):
+    if engine == "firefox":
+        return [browser, "--headless", "--no-remote", "--profile", profile_dir,
+                "--window-size", f"{dimensions[0]},{dimensions[1]}", "--screenshot", output, target]
+    command = [
+        browser,
+        target,
+        "--headless",
+        f"--user-data-dir={profile_dir}",
+        f"--screenshot={output}",
+        f"--window-size={dimensions[0]},{dimensions[1]}",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--use-gl=swiftshader",
+        "--hide-scrollbars",
+        "--in-process-gpu",
+        "--js-flags=--jitless",
+        "--disable-zero-copy",
+        "--disable-gpu-memory-buffer-compositor-resources",
+        "--disable-extensions",
+        "--disable-plugins",
+        "--mute-audio",
+        "--renderer-process-limit=1",
+        "--no-zygote",
+        "--no-sandbox"
+    ]
+    if timeout_ms:
+        command.append(f"--timeout={timeout_ms}")
+    return command
+
+
+def take_screenshot(target, dimensions, timeout_ms=None, *, engine="chromium"):
     img_file_path = None
     profile = None
     try:
-        # Find available browser binary
-        browser = _find_chromium_binary()
+        if engine == "firefox":
+            browser = shutil.which("firefox-esr") or shutil.which("firefox")
+        elif engine == "chromium":
+            browser = _find_chromium_binary()
+        else:
+            raise ValueError("Unknown screenshot engine")
         if not browser:
-            logger.error("No Chromium-based browser found. Install chromium, chromium-headless-shell, or chrome.")
+            logger.error("Screenshot engine %s is unavailable", engine)
             return None
 
         # Create a temporary output file for the screenshot
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
             img_file_path = img_file.name
-        profile = tempfile.TemporaryDirectory(prefix="inkypi-chrome-")
+        profile = tempfile.TemporaryDirectory(prefix="inkypi-browser-")
 
-        command = [
-            browser,
-            target,
-            "--headless",
-            f"--user-data-dir={profile.name}",
-            f"--screenshot={img_file_path}",
-            f"--window-size={dimensions[0]},{dimensions[1]}",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--use-gl=swiftshader",
-            "--hide-scrollbars",
-            "--in-process-gpu",
-            "--js-flags=--jitless",
-            "--disable-zero-copy",
-            "--disable-gpu-memory-buffer-compositor-resources",
-            "--disable-extensions",
-            "--disable-plugins",
-            "--mute-audio",
-            "--renderer-process-limit=1",
-            "--no-zygote",
-            "--no-sandbox"
-        ]
-        if timeout_ms:
-            command.append(f"--timeout={timeout_ms}")
+        command = _screenshot_command(engine, browser, target, dimensions, profile.name, img_file_path, timeout_ms)
         limits = memory_limits()
         check_headroom(limits)
-        deadline = time.monotonic() + SCREENSHOT_DEADLINE
+        wall_timeout = SCREENSHOT_DEADLINE
+        if engine == "firefox" and timeout_ms:
+            wall_timeout = min(wall_timeout, timeout_ms / 1000)
+        deadline = time.monotonic() + wall_timeout
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               start_new_session=(os.name == "posix")) as process:
             try:
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise subprocess.TimeoutExpired(browser, SCREENSHOT_DEADLINE)
+                        raise subprocess.TimeoutExpired(browser, wall_timeout)
                     try:
                         process.wait(timeout=min(0.1, remaining) if limits else remaining)
                         break
@@ -177,6 +192,8 @@ def take_screenshot(target, dimensions, timeout_ms=None):
 
         # Load the image using PIL
         with Image.open(img_file_path) as img:
+            if engine == "firefox" and img.size != tuple(dimensions):
+                raise ValueError("Unexpected Firefox viewport size")
             return img.copy()
     except (OSError, ValueError, MemoryError, subprocess.TimeoutExpired) as exc:
         logger.error("Screenshot failed (%s)", type(exc).__name__)

@@ -7,6 +7,13 @@ class PanelUnavailable(RuntimeError):
     """A user-visible panel state with no underlying driver details."""
 
 
+class PanelTransferError(PanelUnavailable):
+    """A hardware operation failed after the panel may have started changing."""
+
+    def __init__(self):
+        super().__init__("Panel update interrupted. Check the display, then use Force panel refresh.")
+
+
 class PanelIO:
     def __init__(self, timeout=180):
         self.timeout = timeout
@@ -22,7 +29,6 @@ class PanelIO:
                 raise PanelUnavailable("Panel state is uncertain. Use Force panel refresh to retry.")
             result = Future()
             self._active = result
-            self._uncertain = False
             def transfer():
                 try:
                     driver.display_image(frame, settings, **options)
@@ -49,6 +55,13 @@ class PanelIO:
             raise PanelUnavailable("Panel timed out. Check the display before forcing a retry.")
         try:
             result.result()
+        except PanelTransferError:
+            with self._lock:
+                self._uncertain = True
+            raise
+        else:
+            with self._lock:
+                self._uncertain = False
         finally:
             self._release(result)
 

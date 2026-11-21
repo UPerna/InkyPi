@@ -2,6 +2,7 @@ import logging
 from inspect import signature
 import warnings
 from display.abstract_display import AbstractDisplay
+from display.panel_io import PanelTransferError
 
 
 logger = logging.getLogger(__name__)
@@ -33,12 +34,9 @@ class InkyDisplay(AbstractDisplay):
         self._supports_saturation = "saturation" in signature(self.inky_display.set_image).parameters
         self.inky_display.set_border(self.inky_display.BLACK)
 
-        # store display resolution in device config
-        if not self.device_config.get_config("resolution"):
-            self.device_config.update_value(
-                "resolution",
-                [int(self.inky_display.width), int(self.inky_display.height)], 
-                write=True)
+        resolution = [int(self.inky_display.width), int(self.inky_display.height)]
+        if self.device_config.get_config("resolution") != resolution:
+            self.device_config.update_value("resolution", resolution, write=True)
 
     def display_image(self, image, image_settings=(), *, saturation=None):
         
@@ -60,7 +58,10 @@ class InkyDisplay(AbstractDisplay):
         if not image:
             raise ValueError(f"No image provided.")
 
-        # Display the image on the Inky display
+        # The AC073TC1A's Pillow conversion treats L intensities as indices.
+        # Quantize through RGB so white cannot become native index 255.
+        if image.mode == "L":
+            image = image.convert("RGB")
         inky_saturation = saturation
         if inky_saturation is None:
             inky_saturation = self.device_config.get_config('image_settings').get("inky_saturation", 0.5)
@@ -74,4 +75,7 @@ class InkyDisplay(AbstractDisplay):
         with warnings.catch_warnings():
             warnings.filterwarnings("error", message=r"^Busy Wait: Timed out after ",
                                     category=UserWarning, module=r"^inky(?:\.|$)")
-            self.inky_display.show()
+            try:
+                self.inky_display.show()
+            except Exception as error:
+                raise PanelTransferError() from error

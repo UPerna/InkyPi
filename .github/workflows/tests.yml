@@ -3,6 +3,54 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  installed-dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r install/requirements-dev.txt
+      - name: Enable, render and roll back on the installed InkyPi revision
+        run: bash tests/ci/dashboard-plugin.sh
+  arm64-dashboard:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Exercise the dashboard and memory limit on ARM64
+        run: |
+          test "$(uname -m)" = aarch64
+          python -m pip install -r install/requirements-dev.txt
+          PYTHONPATH=src python -m pytest -q tests/test_morning_dashboard.py
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          mkdir -p "$RUNNER_TEMP/arm64-dashboard"
+          set -o pipefail
+          python scripts/pi_memory.py | tee "$RUNNER_TEMP/arm64-dashboard/scope-probe.json"
+          python scripts/benchmark_service.py --pi-budget --preview-dir "$RUNNER_TEMP/arm64-dashboard" | tee "$RUNNER_TEMP/arm64-dashboard/verification.json"
+      - name: Verify both Impression 7.3-inch packed dashboard frames
+        run: |
+          python -m pip install 'inky==2.4.0' gpiod
+          python -c "from inky import inky_ac073tc1a, inky_e673"
+          PYTHONPATH=src python -m pytest -q tests/test_driver_qc.py
+          output="$RUNNER_TEMP/arm64-dashboard"
+          python scripts/check_impression_frame.py "$output/morning.png" "$output" > "$output/driver-frames.json"
+          cat "$output/driver-frames.json"
+          python scripts/check_impression_frame.py "$output/partial-outage.png" "$output/partial-outage" > "$output/outage-driver-frames.json"
+          cat "$output/outage-driver-frames.json"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: arm64-dashboard
+          path: ${{ runner.temp }}/arm64-dashboard/
+          if-no-files-found: error
   pytest:
     strategy:
       matrix:
@@ -18,7 +66,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install test dependencies
         run: |
-          python -m pip install -c install/requirements-dev.txt pytest requests urllib3 pillow psutil python-dotenv jinja2 numpy pytz flask 'inky==2.4.0' gpiod
+          python -m pip install -c install/requirements-dev.txt pytest requests urllib3 pillow psutil python-dotenv jinja2 numpy pytz flask icalendar recurring-ical-events 'inky==2.4.0' gpiod
           python -c "from inky import inky_ac073tc1a, inky_e673"
       - name: Run tests with the mock display
         env:
@@ -43,8 +91,19 @@ jobs:
         if: matrix.python == '3.12'
         run: |
           python -m pip install -r install/requirements-dev.txt
+          firefox --version
           python scripts/benchmark_service.py --baseline "$RUNNER_TEMP/inkypi-baseline" > "$RUNNER_TEMP/service-benchmark.json"
           cat "$RUNNER_TEMP/service-benchmark.json"
+      - name: Check the 200 MiB dashboard service limit on Linux
+        if: matrix.python == '3.12'
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python scripts/benchmark_service.py --pi-budget > "$RUNNER_TEMP/dashboard-cgroup.json"
+          cat "$RUNNER_TEMP/dashboard-cgroup.json"
+      - name: Test physical trial and restoration under systemd with a simulated HAT
+        if: matrix.python == '3.12'
+        run: bash tests/ci/panel-trial.sh
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'
         with:
@@ -52,6 +111,7 @@ jobs:
           path: |
             ${{ runner.temp }}/display-benchmark.json
             ${{ runner.temp }}/service-benchmark.json
+            ${{ runner.temp }}/dashboard-cgroup.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'

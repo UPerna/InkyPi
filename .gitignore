@@ -178,4 +178,5 @@ mock_display_output/
 /src/config/device.json
 /src/config/device*.json.bak
 /src/config/.device*.json*.tmp
+/src/config/.morning-cache/
 /src/static/images/current_image.png

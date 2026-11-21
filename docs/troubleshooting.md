@@ -214,3 +214,45 @@ For more details on how each setting behaves, see the [Pillow documentation](htt
 For Inky displays from Pimoroni, there is an additional option for `Inky Driver Saturation` in the Settings page. This controls the saturation of the palette to which an image is dithered to in the Inky library. Try setting this to '0' which seems to improve the quality of images displayed.
 
 See [this response](https://github.com/pimoroni/inky/issues/225#issuecomment-3213935144) from the Pimoroni team for more details.
+
+## Morning Dashboard and browser memory
+
+Choose **Morning Dashboard** in the plugin list for the Italian weather and agenda screen. It defaults to Milan, uses Europe/Rome and 24-hour time, and accepts one iCalendar feed URL per line. The six precipitation bars start with the current hour. Each percentage applies to the interval beginning at the displayed time. A dash marks a missing probability. The chart accounts for midnight and both daylight-saving transitions. [Open-Meteo hourly forecast definitions](https://open-meteo.com/en/docs)
+
+The agenda puts events in progress and the next appointment first. More than one calendar can carry the same invitation. Matching iCalendar identifiers and occurrences display once, while separate events with identical titles remain visible.
+
+Weather and individual calendars have private 15-minute snapshots beside the device configuration in `.morning-cache/`. Each refresh retries expired feeds. The screen shows how many calendars cover today, how many are using an offline copy, and the oldest successful refresh among them. Each saved calendar covers its fetch date and the following day. An older combined snapshot can cover a first offline upgrade when the exact same feeds are selected and no individual feed covers today.
+
+For web pages, choose **Screenshot → Browser → Firefox / Firefox ESR** to try an installed `firefox-esr` or `firefox` executable. Existing screenshot instances use Chromium. Each capture has a temporary profile, a deadline and the same Linux memory-pressure guard. A site that needs a login or loads its content after the browser captures the page may need a prepared image from another machine.
+
+To check the Zero 2 W, run the following from a checkout of this revision using the InkyPi Python environment. It starts a loopback-only mock service in a fresh systemd user scope, uses synthetic weather and calendar feeds, and performs 100 dashboard refreshes with subprocess launches blocked. The check requires cgroup v2 with memory accounting and a working systemd user session. The service must stay at or below 160 MiB peak under a 200 MiB limit, with zero OOM events. The live panel and service are outside the test.
+
+```sh
+python scripts/benchmark_service.py --pi-budget --preview-dir /tmp/inkypi-dashboard-preview
+```
+
+The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job runs both images through the pinned AC073TC1A and E673 drivers and publishes their previews and memory measurements in the `arm64-dashboard` artifact. QC captures the data command after the driver's final pigment mapping and checks all 384,000 pixels, the order of refresh and power commands, and known grayscale and colour patterns. The previews use nominal pigment colours. Physical colour, BUSY timing and SPI delivery still require a panel test.
+
+If a live refresh reports **Panel update interrupted**, inspect the display and use **Force panel refresh** for one retry. InkyPi keeps the last confirmed preview and pauses ordinary panel writes until a forced write succeeds. An image rejected during encoding can be corrected and retried immediately if the panel was previously in a known state.
+
+### Enable Morning Dashboard on an older installation
+
+From the separate Pi QC checkout, run `bash scripts/dashboard-plugin.sh enable` once the current panel refresh has finished. This installs a versioned copy of Morning Dashboard and its two private helpers, restarts the installed service and checks that the dashboard form loads. A failed activation removes the plugin link and restarts the previous configuration.
+
+Open `/plugin/morning_dashboard` on the Pi's web interface. Leave the Milan defaults and select **Update Now** for one refresh. To schedule it later, use **Add to Playlist**. To remove it, first remove any Morning Dashboard playlist entries, then run `bash scripts/dashboard-plugin.sh disable`. Disabling removes the live plugin link. The versioned files and the dashboard's private cache remain on disk. The panel trial's separate restore command repaints the image saved for that trial.
+
+### Test one physical Impression frame and restore the previous picture
+
+Run these commands from the separate Pi QC checkout, using the ordinary SSH account. Wait for the panel to finish any refresh already in progress. The test uses the previously generated `previews/morning.png` and the virtual environment at `/usr/local/inkypi/venv_inkypi`. It requires a running `inkypi.service`, systemd 253 or newer, and a saved preview from the live service.
+
+```sh
+bash scripts/panel-trial.sh test
+```
+
+The test temporarily stops the live service, saves its previous picture and saturation privately under `~/.local/state/inkypi-panel-trial/`, and sends one frame through the checkout's driver. Systemd starts the original service again when the worker exits, including on failure or timeout. The scheduler can subsequently replace the test picture. The trial uses the existing installation and boot settings.
+
+```sh
+bash scripts/panel-trial.sh restore
+```
+
+Restore uses the installed driver to repaint the saved picture and resumes the original service. The saved preview is the best available record of the previous picture. Neither driver can read the pigment state back from the glass. If SSH disconnects, reconnect and check `systemctl is-active inkypi.service` and `sudo journalctl -u inkypi-panel-trial.service -n 30 --no-pager`.
