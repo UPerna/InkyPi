@@ -161,13 +161,14 @@ class Config:
         width, height = resolution
         return (int(width), int(height))
 
-    def update_config(self, config):
+    def update_config(self, config, *, refresh_info=None):
         """Serialize saves from web and refresh threads sharing this service instance."""
         path = Path(self.config_file).resolve()
         backup = path.with_suffix(path.suffix + ".bak")
         with self._write_lock:
+            latest = self.refresh_info if refresh_info is None else refresh_info
             candidate = {**self.config, **config, "playlist_config": self.playlist_manager.to_dict(),
-                         "refresh_info": self.refresh_info.to_dict()}
+                         "refresh_info": latest.to_dict()}
             raw = json.dumps(candidate, indent=4).encode("utf-8")
             _decode_config(raw)
             if raw != self._last_saved or not path.exists():
@@ -184,6 +185,7 @@ class Config:
                 self._last_saved = raw
                 self._source_metadata = metadata
             self.config.update(candidate)
+            self.refresh_info = latest
             _sync_directory(path.parent)
 
     def update_value(self, key, value, write=False):

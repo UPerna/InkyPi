@@ -37,7 +37,7 @@ class InkyDisplay(AbstractDisplay):
                 [int(self.inky_display.width), int(self.inky_display.height)], 
                 write=True)
 
-    def display_image(self, image, image_settings=[]):
+    def display_image(self, image, image_settings=(), *, saturation=None):
         
         """
         Displays the provided image on the Inky display.
@@ -58,7 +58,9 @@ class InkyDisplay(AbstractDisplay):
             raise ValueError(f"No image provided.")
 
         # Display the image on the Inky display
-        inky_saturation = self.device_config.get_config('image_settings').get("inky_saturation", 0.5)
+        inky_saturation = saturation
+        if inky_saturation is None:
+            inky_saturation = self.device_config.get_config('image_settings').get("inky_saturation", 0.5)
         logger.info(f"Inky Saturation: {inky_saturation}")
         self.inky_display.set_image(image, saturation=inky_saturation)
         self.inky_display.show()

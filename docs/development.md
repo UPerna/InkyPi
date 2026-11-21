@@ -141,3 +141,11 @@ Different platforms have different available browser packages, refer to the reco
 | Windows | Chromium or Google Chrome | devbox method installs chromium on WSL2,<br>if using native Windows (not devbox via WSL2), chromium or google-chrome should also work if in PATH | 
 
 InkyPi will search for a Chrome-like browser in the project's PATH (if using devbox method) and your system's PATH in that order. 
+
+## Refresh requests
+
+`POST /update_now` (plugin form) and `POST /display_plugin_instance` (saved playlist item) return HTTP 202 with an ID and a status URL in the JSON and `Location` header. Poll that URL for `queued`, `running`, `completed`, `superseded`, or `failed`. Completion includes frames that already match the display. HTTP 503 means the worker is stopped.
+
+The worker finishes its current panel operation. One manual request can wait behind it, and a newer request replaces the waiting one. The last 128 terminal results are kept in memory. An expired or pre-restart ID returns HTTP 404. Scheduled work uses the same worker. A due playlist check runs on restart when a prior refresh time is available.
+
+`GET /api/current_image` serves the last published panel frame. Generating a plugin image or a playlist thumbnail does not publish it. A driver failure preserves the previous PNG. Select **Force panel refresh** on the plugin form or append `?force_display=1` to either POST to resend identical content. The first update after a worker process restart reconciles the panel once. Driver acknowledgement records a successful return from the driver. A visual check is still needed on physical hardware.

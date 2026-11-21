@@ -222,13 +222,14 @@ class Playlist:
         """Find a plugin instance by its plugin_id and name."""
         return next((p for p in self.plugins if p.plugin_id == plugin_id and p.name == name), None)
 
-    def get_next_plugin(self):
-        """Returns the next plugin instance in the playlist and update the current_plugin_index."""
+    def next_plugin_index(self):
         if self.current_plugin_index is None:
-            self.current_plugin_index = 0
-        else:
-            self.current_plugin_index = (self.current_plugin_index + 1) % len(self.plugins)
-        
+            return 0
+        return (self.current_plugin_index + 1) % len(self.plugins)
+
+    def get_next_plugin(self):
+        """Advance to and return the next plugin."""
+        self.current_plugin_index = self.next_plugin_index()
         return self.plugins[self.current_plugin_index]
 
     def get_priority(self):
@@ -306,14 +307,6 @@ class PluginInstance:
                 return True
 
         # Check for scheduled refresh (HH:MM format)
-        if "scheduled" in self.refresh:
-            scheduled_time_str = self.refresh.get("scheduled")
-            latest_refresh_str = latest_refresh_dt.strftime("%H:%M")
-
-            # If the latest refresh is before the scheduled time today
-            if latest_refresh_str < scheduled_time_str:
-                return True
-        
         if "scheduled" in self.refresh:
             scheduled_time_str = self.refresh.get("scheduled")
             scheduled_time = datetime.strptime(scheduled_time_str, "%H:%M").time()

@@ -1,8 +1,12 @@
 import fnmatch
+import hashlib
+import os
+from pathlib import Path
+import tempfile
 import json
 import logging
 
-from utils.image_utils import resize_image, change_orientation, apply_image_enhancement
+from utils.image_utils import resize_image, change_orientation, apply_image_enhancement, compute_image_hash
 from display.mock_display import MockDisplay
 
 logger = logging.getLogger(__name__)
@@ -36,9 +40,12 @@ class DisplayManager:
         """
         
         self.device_config = device_config
+        # Reconcile once after every restart, including an interrupted panel write.
+        self._confirmed_hash = None
      
         display_type = device_config.get_config("display_type", default="inky")
 
+        self.display_type = display_type
         if display_type == "mock":
             self.display = MockDisplay(device_config)
         elif display_type == "inky":
@@ -54,31 +61,42 @@ class DisplayManager:
         else:
             raise ValueError(f"Unsupported display type: {display_type}")
 
-    def display_image(self, image, image_settings=[]):
-        
-        """
-        Delegates image rendering to the appropriate display instance.
+    def prepare_frame(self, image, image_settings):
+        """Prepare the panel pixels and options without updating the device or its last frame."""
+        config = self.device_config.get_config().copy()
+        orientation = config.get("orientation") or "horizontal"
+        inverted = bool(config.get("inverted_image"))
+        enhancements = dict(config.get("image_settings", {}))
+        frame = change_orientation(image, orientation)
+        frame = resize_image(frame, config["resolution"], image_settings)
+        if inverted:
+            frame = frame.rotate(180)
+        frame = apply_image_enhancement(frame, enhancements)
+        driver_options = {}
+        if self.display_type == "inky":
+            driver_options["saturation"] = enhancements.get("inky_saturation", 0.5)
 
-        Args:
-            image (PIL.Image): The image to be displayed.
-            image_settings (list, optional): List of settings to modify image rendering.
+        # Include geometry and driver parameters, which raw RGB bytes alone omit.
+        signature = [self.display_type, frame.size, orientation, inverted, image_settings,
+                     enhancements, driver_options, compute_image_hash(frame)]
+        digest = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
+        return frame, driver_options, digest
 
-        Raises:
-            ValueError: If no valid display instance is found.
-        """
+    def display_image(self, image, image_settings=(), *, force=False):
+        frame, options, digest = self.prepare_frame(image, image_settings)
+        path = Path(self.device_config.current_image_file)
+        if not force and digest == self._confirmed_hash and path.is_file():
+            return digest, False
 
-        if not hasattr(self, "display"):
-            raise ValueError("No valid display instance initialized.")
-        
-        # Save the image
-        logger.info(f"Saving image to {self.device_config.current_image_file}")
-        image.save(self.device_config.current_image_file)
-
-        # Resize and adjust orientation
-        image = change_orientation(image, self.device_config.get_config("orientation"))
-        image = resize_image(image, self.device_config.get_resolution(), image_settings)
-        if self.device_config.get_config("inverted_image"): image = image.rotate(180)
-        image = apply_image_enhancement(image, self.device_config.get_config("image_settings"))
-
-        # Pass to the concrete instance to render to the device.
-        self.display.display_image(image, image_settings)
+        # Stage first so an encoding or storage error cannot start a panel write.
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".current-", suffix=".png", delete=False) as tmp:
+            staged = Path(tmp.name)
+        try:
+            frame.save(staged, format="PNG")
+            self._confirmed_hash = None
+            self.display.display_image(frame, image_settings, **options)
+            os.replace(staged, path)
+            self._confirmed_hash = digest
+        finally:
+            staged.unlink(missing_ok=True)
+        return digest, True
