@@ -19,8 +19,9 @@ jobs:
           sudo loginctl enable-linger "$(id -un)"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           mkdir -p "$RUNNER_TEMP/arm64-dashboard"
-          python scripts/benchmark_service.py --pi-budget --preview-dir "$RUNNER_TEMP/arm64-dashboard" > "$RUNNER_TEMP/arm64-dashboard/verification.json"
-          cat "$RUNNER_TEMP/arm64-dashboard/verification.json"
+          set -o pipefail
+          python scripts/pi_memory.py | tee "$RUNNER_TEMP/arm64-dashboard/scope-probe.json"
+          python scripts/benchmark_service.py --pi-budget --preview-dir "$RUNNER_TEMP/arm64-dashboard" | tee "$RUNNER_TEMP/arm64-dashboard/verification.json"
       - name: Verify both Impression 7.3-inch packed dashboard frames
         run: |
           python -m pip install 'inky==2.4.0' gpiod
@@ -28,6 +29,7 @@ jobs:
           python scripts/check_impression_frame.py "$output/morning.png" "$output" > "$output/driver-frames.json"
           cat "$output/driver-frames.json"
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: arm64-dashboard
           path: ${{ runner.temp }}/arm64-dashboard/

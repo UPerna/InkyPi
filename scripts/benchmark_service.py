@@ -11,12 +11,13 @@ import sys
 import tarfile
 import tempfile
 import time
-import uuid
 from zoneinfo import ZoneInfo
 
 from PIL import Image
 import psutil
 import requests
+
+from pi_memory import measure_scope, new_scope, scope_command
 
 
 def serve(root):
@@ -126,16 +127,6 @@ def refresh(session, url, service, form, marker=None):
     raise TimeoutError("Service refresh did not finish")
 
 
-def pi_cgroup_result(pid):
-    entry = next(line[3:] for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines() if line.startswith("0::"))
-    directory = Path("/sys/fs/cgroup") / entry.lstrip("/")
-    assert "inkypi-qc-" in directory.name and int((directory/"memory.max").read_text()) == 200 * 2**20
-    peak = int((directory/"memory.peak").read_text())
-    events = dict(line.split() for line in (directory/"memory.events").read_text().splitlines())
-    assert peak <= 160 * 2**20 and int(events["oom"]) == 0 and int(events["oom_kill"]) == 0, (peak, events)
-    return {"peak_bytes": peak, "events": events}
-
-
 def exercise_dashboard(root, session, url, service, preview_dir):
     (root / "dashboard-active").touch()
     form = {"plugin_id": "morning_dashboard", "calendarFeeds": "\n".join(
@@ -196,8 +187,8 @@ def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False, 
             start = time.monotonic()
             command = [sys.executable, __file__, "--serve", str(root)]
             if pi_budget:
-                command = ["systemd-run", "--user", "--scope", "--quiet", "--unit=inkypi-qc-" + uuid.uuid4().hex,
-                           "--property=MemoryMax=200M", "--property=MemoryAccounting=yes", *command]
+                unit = new_scope()
+                command = scope_command(unit, command)
             with subprocess.Popen(command, cwd=root,
                                   env=env, stdout=log, stderr=subprocess.STDOUT) as child:
                 try:
@@ -218,7 +209,7 @@ def run_checkout(checkout, with_browser, dashboard_runs=False, pi_budget=False, 
                     if dashboard_runs:
                         result["dashboard"] = exercise_dashboard(root, session, url, service, preview_dir)
                         if pi_budget:
-                            result["dashboard"]["cgroup"] = pi_cgroup_result(service.pid)
+                            result["dashboard"]["cgroup"] = measure_scope(service.pid, unit)
                     return result
                 except Exception:
                     print((root / "service.log").read_text()[-1800:], file=sys.stderr)
@@ -250,3 +241,5 @@ if __name__ == "__main__":
         if args.baseline:
             report["baseline"] = run_checkout(args.baseline, False)
         print(json.dumps(report, indent=2))
+        if args.pi_budget and report["candidate"]["dashboard"]["cgroup"]["status"] != "passed":
+            sys.exit(1)
