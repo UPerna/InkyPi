@@ -88,6 +88,9 @@ jobs:
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python scripts/benchmark_service.py --pi-budget > "$RUNNER_TEMP/dashboard-cgroup.json"
           cat "$RUNNER_TEMP/dashboard-cgroup.json"
+      - name: Test physical trial and restoration under systemd with a simulated HAT
+        if: matrix.python == '3.12'
+        run: bash tests/ci/panel-trial.sh
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'
         with:

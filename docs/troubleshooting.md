@@ -234,3 +234,19 @@ python scripts/benchmark_service.py --pi-budget --preview-dir /tmp/inkypi-dashbo
 The test saves `morning.png` and `partial-outage.png` from the mock service. The ARM64 CI job runs both images through the pinned AC073TC1A and E673 drivers and publishes their previews and memory measurements in the `arm64-dashboard` artifact. QC captures the data command after the driver's final pigment mapping and checks all 384,000 pixels, the order of refresh and power commands, and known grayscale and colour patterns. The previews use nominal pigment colours. Physical colour, BUSY timing and SPI delivery still require a panel test.
 
 If a live refresh reports **Panel update interrupted**, inspect the display and use **Force panel refresh** for one retry. InkyPi keeps the last confirmed preview and pauses ordinary panel writes until a forced write succeeds. An image rejected during encoding can be corrected and retried immediately if the panel was previously in a known state.
+
+### Test one physical Impression frame and restore the previous picture
+
+Run these commands from the separate Pi QC checkout, using the ordinary SSH account. Wait for the panel to finish any refresh already in progress. The test uses the previously generated `previews/morning.png` and the virtual environment at `/usr/local/inkypi/venv_inkypi`. It requires a running `inkypi.service`, systemd 253 or newer, and a saved preview from the live service.
+
+```sh
+bash scripts/panel-trial.sh test
+```
+
+The test temporarily stops the live service, saves its previous picture and saturation privately under `~/.local/state/inkypi-panel-trial/`, and sends one frame through the checkout's driver. Systemd starts the original service again when the worker exits, including on failure or timeout. The scheduler can subsequently replace the test picture. The trial uses the existing installation and boot settings.
+
+```sh
+bash scripts/panel-trial.sh restore
+```
+
+Restore uses the installed driver to repaint the saved picture and resumes the original service. The saved preview is the best available record of the previous picture. Neither driver can read the pigment state back from the glass. If SSH disconnects, reconnect and check `systemctl is-active inkypi.service` and `sudo journalctl -u inkypi-panel-trial.service -n 30 --no-pager`.
