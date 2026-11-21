@@ -136,16 +136,22 @@ def test_hung_browser_and_descendant_are_stopped_and_files_released(tmp_path, mo
     monkeypatch.setattr("tempfile.tempdir", str(scratch))
     monkeypatch.setattr(image_utils, "_find_chromium_binary", lambda: str(browser))
     monkeypatch.setattr(image_utils, "SCREENSHOT_DEADLINE", 0.5)
+    monkeypatch.setattr(image_utils, "memory_limits", lambda: [])
     start = time.monotonic()
     assert image_utils.take_screenshot_html("<p>Fixture</p>", (80, 48)) is None
     assert time.monotonic() - start < 3
     child = int(marker.read_text())
     until = time.monotonic() + 1
-    while time.monotonic() < until and psutil.pid_exists(child):
-        if psutil.Process(child).status() == psutil.STATUS_ZOMBIE:
+    while time.monotonic() < until:
+        try:
+            status = psutil.Process(child).status()
+        except psutil.NoSuchProcess:
+            break
+        if status == psutil.STATUS_ZOMBIE:
             break
         time.sleep(0.01)
-    assert not psutil.pid_exists(child) or psutil.Process(child).status() == psutil.STATUS_ZOMBIE
+    else:
+        pytest.fail("Browser descendant survived process-group termination")
     assert list(scratch.iterdir()) == []
 
 

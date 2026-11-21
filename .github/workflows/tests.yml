@@ -26,6 +26,13 @@ jobs:
         run: python -m pytest -q
       - name: Render the reference clock
         run: python scripts/render_reference_clock.py
+      - name: Repeat timing-sensitive recovery tests five times
+        env:
+          PYTHONPATH: src
+        run: |
+          for attempt in 1 2 3 4 5; do
+            python -m pytest -q tests/test_driver_qc.py tests/test_media_budgets.py -k 'late_transfer or hung_browser or stops_under_memory_pressure'
+          done
       - name: Verify pixel parity and benchmark both renderers
         if: matrix.python == '3.12'
         run: |
