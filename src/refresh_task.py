@@ -10,6 +10,7 @@ from datetime import datetime
 from uuid import uuid4
 from plugins.plugin_registry import get_plugin_instance
 from utils.app_utils import generate_startup_image
+from display.panel_io import PanelUnavailable
 from model import RefreshInfo, PlaylistManager
 from PIL import Image
 
@@ -150,9 +151,11 @@ class RefreshTask:
                 delay = self._remaining_interval() if action else self._interval()
                 deadline = time.monotonic() + delay
                 state = "completed"
-            except Exception:
+            except Exception as error:
                 logger.exception("Refresh failed")
                 state, message = "failed", "Refresh failed. Check the device log and retry."
+                if isinstance(error, PanelUnavailable):
+                    message = str(error)
                 # A failed or overdue scheduled item must not create a busy loop.
                 if not job or changed:
                     try:

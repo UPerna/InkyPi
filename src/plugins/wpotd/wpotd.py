@@ -22,13 +22,17 @@ Flow:
 """
 
 from plugins.base_plugin.base_plugin import BasePlugin
-from PIL import Image, UnidentifiedImageError
-from io import BytesIO
-from utils.http_client import get_http_session
+from PIL import Image, ImageDraw, PngImagePlugin
+from pathlib import Path
+from urllib.parse import urlsplit
+from tempfile import NamedTemporaryFile
+import os
+import json
+import time
+from utils.http_client import get_http_session, bounded_chunks
 import logging
 from random import randint
 from datetime import datetime, timedelta, date
-from functools import lru_cache
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,10 @@ logger = logging.getLogger(__name__)
 class Wpotd(BasePlugin):
     HEADERS = {'User-Agent': 'InkyPi/1.0 (https://github.com/fatihak/InkyPi/)'}
     API_URL = "https://en.wikipedia.org/w/api.php"
+
+    NON_IMAGE = (".svg", ".webm", ".ogv", ".ogg", ".oga", ".ogx", ".opus", ".mp4",
+                 ".mpg", ".mpeg", ".mp3", ".wav", ".flac", ".mid", ".pdf", ".djvu", ".stl")
+    CACHE_LIMIT = 2 * 1024 * 1024
 
     def generate_settings_template(self) -> Dict[str, Any]:
         template_params = super().generate_settings_template()
@@ -49,39 +57,65 @@ class Wpotd(BasePlugin):
         logger.info(f"Fetching Wikipedia Picture of the Day for: {datetofetch}")
         logger.debug(f"Settings: shrink_to_fit={settings.get('shrinkToFitWpotd', 'false')}, randomize={settings.get('randomizeWpotd', 'false')}")
 
-        data = self._fetch_potd(datetofetch)
-        picurl = data["image_src"]
-        logger.info(f"Image URL: {picurl}")
-        logger.debug(f"Image filename: {data.get('filename', 'Unknown')}")
-
-        # Get dimensions
-        max_width, max_height = device_config.get_resolution()
+        width, height = map(int, device_config.get_resolution())
         if device_config.get_config("orientation") == "vertical":
-            max_width, max_height = max_height, max_width
-            logger.debug(f"Vertical orientation detected, dimensions: {max_width}x{max_height}")
-
-        dimensions = (max_width, max_height)
-
-        # Use adaptive loader if shrink-to-fit is enabled
-        shrink_to_fit = settings.get("shrinkToFitWpotd") == "true"
-        logger.debug(
-            f"Shrink-to-fit={'enabled' if shrink_to_fit else 'disabled'}; "
-            f"{'using adaptive loader' if shrink_to_fit else 'downloading original size'}"
-        )
-
-        image = self._download_image(
-            picurl,
-            dimensions=dimensions,
-            resize=shrink_to_fit,
-        )
-        if image is None:
-            logger.error("Failed to download WPOTD image")
-            raise RuntimeError("Failed to download WPOTD image.")
-        if shrink_to_fit:
-            logger.info(f"Image resized to fit device dimensions: {max_width}x{max_height}")
-
-        logger.info("=== Wikipedia POTD Plugin: Image generation complete ===")
+            width, height = height, width
+        dimensions = (width, height)
+        resize = settings.get("shrinkToFitWpotd") == "true"
+        selection = "random" if settings.get("randomizeWpotd") == "true" else settings.get("customDate") or "today"
+        key = json.dumps([selection, dimensions, resize])
+        path = Path(device_config.plugin_image_dir) / ".wpotd-last.png"
+        try:
+            url = self._fetch_potd(datetofetch)["image_src"]
+            image = self._download_image(url, dimensions, resize)
+        except RuntimeError:
+            cached = self._read_cached(path, key, dimensions)
+            if cached is None:
+                raise
+            return cached
+        self._save_cached(path, key, datetofetch, image, dimensions)
         return image
+
+    def _save_cached(self, path, key, source_date, image, dimensions):
+        # One panel-sized fallback across all WPOTD requests. Original-size mode
+        # keeps its full-resolution live result. Crop to the panel for the fallback.
+        from utils.image_utils import resize_image
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("request", key)
+        metadata.add_text("source_date", source_date.isoformat())
+        temp_path = None
+        try:
+            if dimensions[0] * dimensions[1] > 1_000_000:
+                return
+            cached = resize_image(image, dimensions) if image.size != dimensions else image
+            with NamedTemporaryFile(dir=path.parent, prefix=".wpotd-", suffix=".tmp", delete=False) as out:
+                temp_path = Path(out.name)
+                cached.save(out, format="PNG", pnginfo=metadata)
+                length = out.tell()
+            if length <= self.CACHE_LIMIT:
+                os.replace(temp_path, path)
+        except (OSError, ValueError):
+            logger.warning("Could not save the WPOTD fallback")
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+    def _read_cached(self, path, key, dimensions):
+        try:
+            if path.stat().st_size > self.CACHE_LIMIT:
+                return None
+            with Image.open(path) as source:
+                if source.info.get("request") != key or source.size != dimensions or source.width * source.height > 1_000_000:
+                    return None
+                stamp = date.fromisoformat(source.info["source_date"])
+                cached = source.convert("RGB")
+            draw = ImageDraw.Draw(cached)
+            label = f"Cached | {stamp.isoformat()}"
+            draw.rectangle((0, 0, cached.width - 1, 19), fill="white")
+            draw.text((4, 3), label, fill="black")
+            return cached
+        except (OSError, ValueError, KeyError, Image.DecompressionBombError):
+            return None
 
     def _determine_date(self, settings: Dict[str, Any]) -> date:
         if settings.get("randomizeWpotd") == "true":
@@ -102,27 +136,12 @@ class Wpotd(BasePlugin):
             dimensions: Target dimensions if resizing
             resize: Whether to use adaptive resizing
         """
-        try:
-            if url.lower().endswith(".svg"):
-                logger.warning("SVG format is not supported by Pillow. Skipping image download.")
-                raise RuntimeError("Unsupported image format: SVG.")
-
-            if resize and dimensions:
-                # Use adaptive loader for memory-efficient processing
-                return self.image_loader.from_url(url, dimensions, timeout_ms=10000, headers=self.HEADERS)
-            else:
-                # Original behavior: download without resizing
-                session = get_http_session()
-                response = session.get(url, headers=self.HEADERS, timeout=10)
-            response.raise_for_status()
-            return Image.open(BytesIO(response.content))
-
-        except UnidentifiedImageError as e:
-            logger.error(f"Unsupported image format at {url}: {str(e)}")
-            raise RuntimeError("Unsupported image format.")
-        except Exception as e:
-            logger.error(f"Failed to load WPOTD image from {url}: {str(e)}")
-            raise RuntimeError("Failed to load WPOTD image.")
+        if urlsplit(url).path.lower().endswith(self.NON_IMAGE):
+            raise RuntimeError("Unsupported Wikipedia picture media type")
+        image = self.image_loader.from_url(url, dimensions, timeout_ms=10000, resize=resize, headers=self.HEADERS)
+        if image is None:
+            raise RuntimeError("Unable to load Wikipedia picture within resource limits")
+        return image
 
     def _fetch_potd(self, cur_date: date) -> Dict[str, Any]:
         title = f"Template:POTD/{cur_date.isoformat()}"
@@ -169,9 +188,10 @@ class Wpotd(BasePlugin):
     def _make_request(self, params: Dict[str, Any]) -> Dict[str, Any]:
         try:
             session = get_http_session()
-            response = session.get(self.API_URL, params=params, headers=self.HEADERS, timeout=10)
-            response.raise_for_status()
-            return response.json()
+            deadline = time.monotonic() + 10
+            with session.get(self.API_URL, params=params, headers=self.HEADERS, timeout=(5, 5), stream=True) as response:
+                response.raise_for_status()
+                return json.loads(b"".join(bounded_chunks(response, 256 * 1024, deadline)))
         except Exception as e:
             logger.error(f"Wikipedia API request failed with params {params}: {str(e)}")
             raise RuntimeError("Wikipedia API request failed.")

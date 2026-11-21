@@ -6,7 +6,6 @@ import sys
 from display.abstract_display import AbstractDisplay
 from PIL import Image
 from pathlib import Path
-from plugins.plugin_registry import get_plugin_instance
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +79,6 @@ class WaveshareDisplay(AbstractDisplay):
             if not callable(self.epd_display_init):
                 raise AttributeError("No Init/init method found")
 
-            self.epd_display_init()
-
             display_args_spec = inspect.getfullargspec(self.epd_display.display)
         except ModuleNotFoundError:
             raise ValueError(f"Unsupported Waveshare display type: {display_type}")
@@ -121,21 +118,24 @@ class WaveshareDisplay(AbstractDisplay):
             raise ValueError(f"No image provided.")
 
         # Assume device was in sleep mode.
-        self.epd_display_init()
+        status = self.epd_display_init()
+        if isinstance(status, int) and status < 0:
+            raise OSError("Waveshare initialization failed")
 
         # Clear residual pixels before updating the image.
-        self.epd_display.Clear()
-
-        # Display the image on the WS display.
-        if not self.bi_color_display:
-            self.epd_display.display(self.epd_display.getbuffer(image))
-        else:
-            black_layer, red_layer = split_image_for_bi_color_epd(image)
-
-            self.epd_display.display(
-                self.epd_display.getbuffer(black_layer),
-                self.epd_display.getbuffer(red_layer),
-            )
+        try:
+            self.epd_display.Clear()
+            if not self.bi_color_display:
+                self.epd_display.display(self.epd_display.getbuffer(image))
+            else:
+                black, red = split_image_for_bi_color_epd(image.convert("RGB") if image.mode != "RGB" else image)
+                self.epd_display.display(self.epd_display.getbuffer(black), self.epd_display.getbuffer(red))
+        except Exception:
+            try:
+                self.epd_display.sleep()
+            except Exception:
+                logger.exception("Waveshare sleep also failed after a transfer error")
+            raise
 
         # Put device into low power mode (EPD displays maintain image when powered off)
         logger.info("Putting Waveshare display into sleep mode for power saving.")

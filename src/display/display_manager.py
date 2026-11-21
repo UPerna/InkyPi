@@ -8,19 +8,9 @@ import logging
 
 from utils.image_utils import resize_image, change_orientation, apply_image_enhancement, compute_image_hash
 from display.mock_display import MockDisplay
+from display.panel_io import PanelIO
 
 logger = logging.getLogger(__name__)
-
-# Try to import hardware displays, but don't fail if they're not available
-try:
-    from display.inky_display import InkyDisplay
-except ImportError:
-    logger.info("Inky display not available, hardware support disabled")
-
-try:
-    from display.waveshare_display import WaveshareDisplay
-except ImportError:
-    logger.info("Waveshare display not available, hardware support disabled")
 
 class DisplayManager:
 
@@ -46,9 +36,11 @@ class DisplayManager:
         display_type = device_config.get_config("display_type", default="inky")
 
         self.display_type = display_type
+        self.panel_io = None if display_type == "mock" else PanelIO()
         if display_type == "mock":
             self.display = MockDisplay(device_config)
         elif display_type == "inky":
+            from display.inky_display import InkyDisplay
             self.display = InkyDisplay(device_config)
         elif fnmatch.fnmatch(display_type, "epd*in*"):  
             # derived from waveshare epd - we assume here that will be consistent
@@ -57,6 +49,7 @@ class DisplayManager:
             # that for future use if the need arises.
             #
             # see https://github.com/waveshareteam/e-Paper
+            from display.waveshare_display import WaveshareDisplay
             self.display = WaveshareDisplay(device_config)
         else:
             raise ValueError(f"Unsupported display type: {display_type}")
@@ -67,8 +60,9 @@ class DisplayManager:
         orientation = config.get("orientation") or "horizontal"
         inverted = bool(config.get("inverted_image"))
         enhancements = dict(config.get("image_settings", {}))
-        frame = change_orientation(image, orientation)
-        frame = resize_image(frame, config["resolution"], image_settings)
+        frame = image if orientation == "horizontal" else change_orientation(image, orientation)
+        if frame.size != tuple(map(int, config["resolution"])):
+            frame = resize_image(frame, config["resolution"], image_settings)
         if inverted:
             frame = frame.rotate(180)
         frame = apply_image_enhancement(frame, enhancements)
@@ -94,7 +88,13 @@ class DisplayManager:
         try:
             frame.save(staged, format="PNG")
             self._confirmed_hash = None
-            self.display.display_image(frame, image_settings, **options)
+            if self.panel_io is None:
+                self.display.display_image(frame, image_settings, **options)
+            else:
+                # A late vendor call can outlive the plugin request. Own the
+                # pixels it reads if preparation reused the plugin's image.
+                transfer_frame = frame.copy() if frame is image else frame
+                self.panel_io.write(self.display, transfer_frame, image_settings, options, force)
             os.replace(staged, path)
             self._confirmed_hash = digest
         finally:
