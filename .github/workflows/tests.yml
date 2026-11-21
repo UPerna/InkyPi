@@ -3,6 +3,19 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  installed-dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r install/requirements-dev.txt
+      - name: Enable, render and roll back on the installed InkyPi revision
+        run: bash tests/ci/dashboard-plugin.sh
   arm64-dashboard:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10

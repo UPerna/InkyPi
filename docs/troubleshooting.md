@@ -235,6 +235,12 @@ The test saves `morning.png` and `partial-outage.png` from the mock service. The
 
 If a live refresh reports **Panel update interrupted**, inspect the display and use **Force panel refresh** for one retry. InkyPi keeps the last confirmed preview and pauses ordinary panel writes until a forced write succeeds. An image rejected during encoding can be corrected and retried immediately if the panel was previously in a known state.
 
+### Enable Morning Dashboard on an older installation
+
+From the separate Pi QC checkout, run `bash scripts/dashboard-plugin.sh enable` once the current panel refresh has finished. This installs a versioned copy of Morning Dashboard and its two private helpers, restarts the installed service and checks that the dashboard form loads. A failed activation removes the plugin link and restarts the previous configuration.
+
+Open `/plugin/morning_dashboard` on the Pi's web interface. Leave the Milan defaults and select **Update Now** for one refresh. To schedule it later, use **Add to Playlist**. To remove it, first remove any Morning Dashboard playlist entries, then run `bash scripts/dashboard-plugin.sh disable`. Disabling removes the live plugin link. The versioned files and the dashboard's private cache remain on disk. The panel trial's separate restore command repaints the image saved for that trial.
+
 ### Test one physical Impression frame and restore the previous picture
 
 Run these commands from the separate Pi QC checkout, using the ordinary SSH account. Wait for the panel to finish any refresh already in progress. The test uses the previously generated `previews/morning.png` and the virtual environment at `/usr/local/inkypi/venv_inkypi`. It requires a running `inkypi.service`, systemd 253 or newer, and a saved preview from the live service.
