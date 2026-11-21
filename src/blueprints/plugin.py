@@ -1,10 +1,11 @@
-from flask import Blueprint, request, jsonify, current_app, render_template, send_from_directory
+from flask import Blueprint, request, jsonify, current_app, render_template, send_from_directory, url_for
 from plugins.plugin_registry import get_plugin_instance
 from utils.app_utils import resolve_path, handle_request_files, parse_form
 from refresh_task import ManualRefresh, PlaylistRefresh
 import json
 import os
 import logging
+from tempfile import TemporaryDirectory
 
 logger = logging.getLogger(__name__)
 plugin_bp = Blueprint("plugin", __name__)
@@ -220,39 +221,52 @@ def display_plugin_instance():
         if not plugin_instance:
             return jsonify({"success": False, "message": f"Plugin instance '{plugin_instance_name}' not found"}), 400
 
-        refresh_task.manual_update(PlaylistRefresh(playlist, plugin_instance, force=True))
+        return _queue_refresh(refresh_task, PlaylistRefresh(playlist, plugin_instance, force=True))
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
-    return jsonify({"success": True, "message": "Display updated"}), 200
 
 @plugin_bp.route('/update_now', methods=['POST'])
 def update_now():
     device_config = current_app.config['DEVICE_CONFIG']
     refresh_task = current_app.config['REFRESH_TASK']
-    display_manager = current_app.config['DISPLAY_MANAGER']
 
+    uploads = None
     try:
         plugin_settings = parse_form(request.form)
-        plugin_settings.update(handle_request_files(request.files))
         plugin_id = plugin_settings.pop("plugin_id")
 
-        # Check if refresh task is running
-        if refresh_task.running:
-            refresh_task.manual_update(ManualRefresh(plugin_id, plugin_settings))
-        else:
-            # In development mode, directly update the display
-            logger.info("Refresh task not running, updating display directly")
-            plugin_config = device_config.get_plugin(plugin_id)
-            if not plugin_config:
-                return jsonify({"error": f"Plugin '{plugin_id}' not found"}), 404
-
-            plugin = get_plugin_instance(plugin_config)
-            image = plugin.generate_image(plugin_settings, device_config)
-            display_manager.display_image(image, image_settings=plugin_config.get("image_settings", []))
+        if not device_config.get_plugin(plugin_id):
+            return jsonify({"error": "Plugin not found"}), 404
+        if request.files:
+            uploads = TemporaryDirectory(prefix="inkypi-refresh-")
+            plugin_settings.update(handle_request_files(request.files, directory=uploads.name))
+        return _queue_refresh(refresh_task, ManualRefresh(plugin_id, plugin_settings), uploads)
 
     except Exception as e:
+        if uploads:
+            uploads.cleanup()
         logger.exception(f"Error in update_now: {str(e)}")
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
-    return jsonify({"success": True, "message": "Display updated"}), 200
+
+def _queue_refresh(task, action, uploads=None):
+    try:
+        job = task.submit(action, force_display=request.args.get("force_display") == "1")
+    except RuntimeError:
+        if uploads:
+            uploads.cleanup()
+        return jsonify({"error": "Refresh worker is unavailable."}), 503
+    if uploads:
+        job.future.add_done_callback(lambda _: uploads.cleanup())
+    status_url = url_for("plugin.refresh_status", request_id=job.id)
+    return jsonify({"success": True, "id": job.id, "message": "Refresh queued.",
+                    "status_url": status_url}), 202, {"Location": status_url}
+
+
+@plugin_bp.get('/api/refresh/<request_id>')
+def refresh_status(request_id):
+    result = current_app.config['REFRESH_TASK'].status(request_id)
+    if result is None:
+        return jsonify({"error": "Refresh result expired or unknown."}), 404
+    return jsonify(result), 200, {"Cache-Control": "no-store"}

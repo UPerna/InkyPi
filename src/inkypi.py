@@ -19,7 +19,6 @@ import json
 import logging
 import threading
 import argparse
-from utils.app_utils import generate_startup_image
 from flask import Flask, request, send_from_directory
 from werkzeug.serving import is_running_from_reloader
 from config import Config
@@ -88,13 +87,6 @@ if __name__ == '__main__':
 
     # start the background refresh task
     refresh_task.start()
-
-    # display default inkypi image on startup
-    if device_config.get_config("startup") is True:
-        logger.info("Startup flag is set, displaying startup image")
-        img = generate_startup_image(device_config.get_resolution())
-        display_manager.display_image(img)
-        device_config.update_value("startup", False, write=True)
 
     try:
         # Run the Flask app

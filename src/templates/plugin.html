@@ -71,6 +71,10 @@
 
             const formData = new FormData(form);
             let url = '{{ url_for("plugin.update_now") }}';
+            if (!action && form.elements.forcePanelRefresh?.checked) {
+                url += '?force_display=1';
+            }
+            formData.delete('forcePanelRefresh');
             let method = 'POST';
             let clearFormOnSubmit = false;
 
@@ -101,8 +105,10 @@
             try {
                 const response = await fetch(url, {method: method, body: formData});
                 const result = await response.json();
-                // Handle the response
-                if (response.ok) {
+                // A queued refresh has a separate completion result.
+                if (response.status === 202) {
+                    trackRefresh(result);
+                } else if (response.ok) {
                     showResponseModal('success', `Success! ${result.message}`);
                 } else {
                     showResponseModal('failure', `Error!  ${result.error}`);
@@ -407,6 +413,7 @@
                     <button type="button" onclick="handleAction('update_instance')" class="action-button">Save</button>
                     <button type="button" onclick="openModal('scheduleModal')" class="action-button right">Save As...</button>
                 {% else %}
+                    <label><input type="checkbox" name="forcePanelRefresh"> Force panel refresh</label>
                     <button type="button" onclick="handleAction()" class="action-button left">Update Now</button>
                     <button type="button" onclick="openModal('scheduleModal')" class="action-button right">Add to Playlist</button>
                 {% endif %}
